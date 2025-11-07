@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "meta-ads": {
+      "command": "python",
+      "args": [
+        "/absolute/path/to/meta-ads-mcp-server/meta_ads_mcp.py"
+      ],
+      "env": {
+        "META_ACCESS_TOKEN": "EAAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    }
+  }
+}

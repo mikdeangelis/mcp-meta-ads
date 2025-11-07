@@ -1,0 +1,1149 @@
+#!/usr/bin/env python3
+"""
+MCP Server for Meta Marketing API (Facebook/Instagram Ads).
+
+Questo server fornisce accesso alle campagne pubblicitarie Facebook/Instagram
+tramite la Meta Marketing API, con tool per analisi e gestione.
+"""
+
+import os
+import json
+from typing import Optional, List, Dict, Any
+from enum import Enum
+from datetime import datetime, timedelta
+import httpx
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from mcp.server.fastmcp import FastMCP
+
+# Inizializza il server MCP
+mcp = FastMCP("meta_ads_mcp")
+
+# Costanti
+API_BASE_URL = "https://graph.facebook.com/v21.0"
+CHARACTER_LIMIT = 25000
+DEFAULT_TIMEOUT = 60.0
+
+
+class ResponseFormat(str, Enum):
+    """Formato di output per le risposte dei tool."""
+    MARKDOWN = "markdown"
+    JSON = "json"
+
+
+class DatePreset(str, Enum):
+    """Preset temporali disponibili per i report."""
+    TODAY = "today"
+    YESTERDAY = "yesterday"
+    LAST_3D = "last_3d"
+    LAST_7D = "last_7d"
+    LAST_14D = "last_14d"
+    LAST_30D = "last_30d"
+    LAST_90D = "last_90d"
+    THIS_MONTH = "this_month"
+    LAST_MONTH = "last_month"
+    THIS_QUARTER = "this_quarter"
+    LIFETIME = "lifetime"
+
+
+class BreakdownType(str, Enum):
+    """Tipi di breakdown disponibili per i report."""
+    AGE = "age"
+    GENDER = "gender"
+    COUNTRY = "country"
+    REGION = "region"
+    PLACEMENT = "publisher_platform"
+    DEVICE_PLATFORM = "device_platform"
+    AGE_GENDER = "age,gender"
+
+
+# Modelli Pydantic per validazione input
+
+class ListAccountsInput(BaseModel):
+    """Input per listare gli account pubblicitari."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    limit: Optional[int] = Field(
+        default=25,
+        description="Numero massimo di account da restituire (1-100)",
+        ge=1,
+        le=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output: 'markdown' per lettura umana, 'json' per elaborazione"
+    )
+
+
+class ListCampaignsInput(BaseModel):
+    """Input per listare le campagne di un account."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    account_id: str = Field(
+        ...,
+        description="ID dell'account pubblicitario (formato: 'act_123456789' o solo '123456789')",
+        min_length=1
+    )
+    limit: Optional[int] = Field(
+        default=25,
+        description="Numero massimo di campagne da restituire (1-100)",
+        ge=1,
+        le=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('account_id')
+    @classmethod
+    def validate_account_id(cls, v: str) -> str:
+        """Assicura che l'account ID abbia il prefisso corretto."""
+        if not v.startswith('act_'):
+            return f'act_{v}'
+        return v
+
+
+class ListAdSetsInput(BaseModel):
+    """Input per listare gli ad set di una campagna."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    campaign_id: str = Field(
+        ...,
+        description="ID della campagna (es. '120212345678901234')",
+        min_length=1
+    )
+    limit: Optional[int] = Field(
+        default=25,
+        description="Numero massimo di ad set da restituire (1-100)",
+        ge=1,
+        le=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+
+class ListAdsInput(BaseModel):
+    """Input per listare gli annunci di un ad set."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    adset_id: str = Field(
+        ...,
+        description="ID dell'ad set (es. '120212345678901234')",
+        min_length=1
+    )
+    limit: Optional[int] = Field(
+        default=25,
+        description="Numero massimo di ads da restituire (1-100)",
+        ge=1,
+        le=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+
+class GetInsightsInput(BaseModel):
+    """Input per ottenere metriche di performance."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    object_id: str = Field(
+        ...,
+        description="ID dell'oggetto (account, campagna, ad set o ad). Per account usa formato 'act_123456789'",
+        min_length=1
+    )
+    level: Optional[str] = Field(
+        default="account",
+        description="Livello di aggregazione: 'account', 'campaign', 'adset', 'ad'"
+    )
+    date_preset: Optional[DatePreset] = Field(
+        default=DatePreset.LAST_30D,
+        description="Periodo temporale preset (es. 'last_7d', 'last_30d'). Ignorato se since/until sono specificati"
+    )
+    since: Optional[str] = Field(
+        default=None,
+        description="Data inizio custom range (formato: YYYY-MM-DD, es. '2025-01-01'). Richiede anche 'until'"
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="Data fine custom range (formato: YYYY-MM-DD, es. '2025-01-31'). Richiede anche 'since'"
+    )
+    time_increment: Optional[int] = Field(
+        default=None,
+        description="Granularità temporale in giorni (1=giornaliero, lasciare vuoto per totale periodo)",
+        ge=1,
+        le=90
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('until')
+    @classmethod
+    def validate_date_range(cls, v: Optional[str], info) -> Optional[str]:
+        """Valida che since e until siano entrambi presenti o entrambi assenti."""
+        since = info.data.get('since')
+        if (since and not v) or (v and not since):
+            raise ValueError("Se usi date personalizzate, devi specificare sia 'since' che 'until'")
+        return v
+
+
+class GetCreativeInput(BaseModel):
+    """Input per ottenere i dettagli creativi di un annuncio."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    ad_id: str = Field(
+        ...,
+        description="ID dell'annuncio (es. '120212345678901234')",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+
+class GenerateReportInput(BaseModel):
+    """Input per generare report con breakdown demografici e geografici."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    object_id: str = Field(
+        ...,
+        description="ID dell'oggetto da analizzare (account, campagna, ad set o ad)",
+        min_length=1
+    )
+    breakdowns: List[BreakdownType] = Field(
+        default=[BreakdownType.AGE],
+        description="Dimensioni di breakdown da applicare (max 4)",
+        max_length=4
+    )
+    date_preset: Optional[DatePreset] = Field(
+        default=DatePreset.LAST_30D,
+        description="Periodo temporale preset. Ignorato se since/until sono specificati"
+    )
+    since: Optional[str] = Field(
+        default=None,
+        description="Data inizio custom range (formato: YYYY-MM-DD). Richiede anche 'until'"
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="Data fine custom range (formato: YYYY-MM-DD). Richiede anche 'since'"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('until')
+    @classmethod
+    def validate_date_range(cls, v: Optional[str], info) -> Optional[str]:
+        """Valida che since e until siano entrambi presenti o entrambi assenti."""
+        since = info.data.get('since')
+        if (since and not v) or (v and not since):
+            raise ValueError("Se usi date personalizzate, devi specificare sia 'since' che 'until'")
+        return v
+
+
+# Funzioni di utilità condivise
+
+def _get_access_token() -> str:
+    """Recupera il token di accesso dalle variabili d'ambiente."""
+    token = os.getenv("META_ACCESS_TOKEN")
+    if not token:
+        raise ValueError(
+            "META_ACCESS_TOKEN non trovato. "
+            "Imposta la variabile d'ambiente con il tuo access token Meta. "
+            "Vedi README.md per istruzioni su come ottenerlo."
+        )
+    return token
+
+
+async def _make_api_request(
+    endpoint: str,
+    method: str = "GET",
+    params: Optional[Dict[str, Any]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Funzione riutilizzabile per tutte le chiamate API."""
+    access_token = _get_access_token()
+
+    if params is None:
+        params = {}
+    params["access_token"] = access_token
+
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method,
+            f"{API_BASE_URL}/{endpoint}",
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+            **kwargs
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def _handle_api_error(e: Exception) -> str:
+    """Gestione errori API consistente."""
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 400:
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get("error", {}).get("message", "Richiesta non valida")
+                return f"Errore: {error_msg}. Verifica i parametri della richiesta."
+            except:
+                return "Errore: Richiesta non valida. Controlla i parametri forniti."
+        elif e.response.status_code == 401:
+            return "Errore: Token di accesso non valido o scaduto. Genera un nuovo token e aggiorna META_ACCESS_TOKEN."
+        elif e.response.status_code == 403:
+            return "Errore: Permessi insufficienti. Verifica che il token abbia i permessi necessari (ads_management, ads_read)."
+        elif e.response.status_code == 404:
+            return "Errore: Risorsa non trovata. Verifica che l'ID sia corretto."
+        elif e.response.status_code == 429:
+            return "Errore: Rate limit raggiunto. Attendi qualche minuto prima di riprovare."
+        elif e.response.status_code >= 500:
+            return f"Errore: Problema temporaneo con i server Meta (status {e.response.status_code}). Riprova tra qualche minuto."
+        return f"Errore API: status code {e.response.status_code}"
+    elif isinstance(e, httpx.TimeoutException):
+        return "Errore: Timeout della richiesta. Riprova o riduci la quantità di dati richiesti."
+    elif isinstance(e, ValueError):
+        return str(e)
+    return f"Errore imprevisto: {type(e).__name__} - {str(e)}"
+
+
+def _format_currency(amount: str, currency: str = "EUR") -> str:
+    """Formatta un valore monetario da centesimi."""
+    try:
+        value = float(amount) / 100
+        return f"{value:.2f} {currency}"
+    except:
+        return f"{amount} (raw)"
+
+
+def _format_percentage(value: float) -> str:
+    """Formatta una percentuale."""
+    return f"{value:.2f}%"
+
+
+def _check_truncation(content: str, data_count: int) -> str:
+    """Verifica e gestisce il troncamento della risposta."""
+    if len(content) > CHARACTER_LIMIT:
+        truncated = content[:CHARACTER_LIMIT]
+        truncated += f"\n\n⚠️ **Risposta troncata** - Mostrati primi {CHARACTER_LIMIT} caratteri su dati totali. "
+        truncated += f"Usa parametri di filtro o paginazione per vedere più risultati."
+        return truncated
+    return content
+
+
+# Implementazione tool
+
+@mcp.tool(
+    name="meta_ads_list_accounts",
+    annotations={
+        "title": "Lista Account Pubblicitari Meta",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_list_accounts(params: ListAccountsInput) -> str:
+    """
+    Elenca tutti gli account pubblicitari Meta a cui l'utente ha accesso.
+
+    Questo tool recupera la lista degli ad account disponibili per l'access token fornito,
+    mostrando informazioni chiave come nome, ID, valuta e stato dell'account.
+
+    Args:
+        params (ListAccountsInput): Parametri validati contenenti:
+            - limit (int): Numero massimo di account da restituire (default: 25, range: 1-100)
+            - response_format (ResponseFormat): Formato output ('markdown' o 'json')
+
+    Returns:
+        str: Lista formattata degli account con le seguenti informazioni per ogni account:
+            - ID (formato act_XXXXX)
+            - Nome dell'account
+            - Valuta
+            - Stato (attivo/disabilitato)
+            - Timezone
+
+        Formato Markdown (default):
+        # Account Pubblicitari Meta
+        Trovati X account
+
+        ## Nome Account (act_123456789)
+        - **Valuta**: EUR
+        - **Stato**: ACTIVE
+        - **Timezone**: Europe/Rome
+
+        Formato JSON:
+        {
+            "total": int,
+            "count": int,
+            "accounts": [
+                {
+                    "id": "act_123456789",
+                    "name": "Nome Account",
+                    "currency": "EUR",
+                    "account_status": 1,
+                    "timezone_name": "Europe/Rome"
+                }
+            ]
+        }
+
+    Esempi d'uso:
+        - "Mostrami tutti i miei account pubblicitari Meta"
+        - "Quali account Facebook Ads ho disponibili?"
+        - "Lista i miei account con il budget disponibile"
+
+    Note:
+        - Richiede permesso ads_read
+        - L'ID ritornato (act_XXXXX) deve essere usato per le chiamate successive
+        - Lo stato può essere: ACTIVE (1), DISABLED (2), UNSETTLED (3), ecc.
+    """
+    try:
+        data = await _make_api_request(
+            "me/adaccounts",
+            params={
+                "fields": "id,name,currency,account_status,timezone_name,business",
+                "limit": params.limit
+            }
+        )
+
+        accounts = data.get("data", [])
+
+        if not accounts:
+            return "Nessun account pubblicitario trovato. Verifica i permessi del token."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Account Pubblicitari Meta\n"]
+            lines.append(f"Trovati {len(accounts)} account\n")
+
+            for acc in accounts:
+                status_map = {1: "ACTIVE", 2: "DISABLED", 3: "UNSETTLED"}
+                status = status_map.get(acc.get("account_status", 0), "UNKNOWN")
+
+                lines.append(f"## {acc['name']} ({acc['id']})")
+                lines.append(f"- **Valuta**: {acc['currency']}")
+                lines.append(f"- **Stato**: {status}")
+                lines.append(f"- **Timezone**: {acc.get('timezone_name', 'N/A')}")
+                if 'business' in acc:
+                    lines.append(f"- **Business**: {acc['business'].get('name', 'N/A')}")
+                lines.append("")
+
+            content = "\n".join(lines)
+            return _check_truncation(content, len(accounts))
+
+        else:
+            result = {
+                "total": len(accounts),
+                "count": len(accounts),
+                "accounts": accounts
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_list_campaigns",
+    annotations={
+        "title": "Lista Campagne Pubblicitarie",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_list_campaigns(params: ListCampaignsInput) -> str:
+    """
+    Elenca tutte le campagne pubblicitarie di un account Meta.
+
+    Recupera la lista completa delle campagne per un account specificato, con dettagli
+    su obiettivo, stato, budget e scheduling.
+
+    Args:
+        params (ListCampaignsInput): Parametri validati contenenti:
+            - account_id (str): ID account (formato 'act_123456789' o '123456789')
+            - limit (int): Numero massimo di campagne (default: 25, range: 1-100)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Lista campagne con:
+            - ID e nome campagna
+            - Obiettivo pubblicitario (es. CONVERSIONS, TRAFFIC, BRAND_AWARENESS)
+            - Stato (ACTIVE, PAUSED, DELETED, ARCHIVED)
+            - Budget giornaliero o lifetime
+            - Date inizio/fine (se programmate)
+            - Numero di ad set associati
+
+    Esempi d'uso:
+        - "Mostrami tutte le campagne attive per l'account act_123456"
+        - "Quali campagne ho in corso?"
+        - "Lista le campagne con budget e obiettivi"
+
+    Note:
+        - Lo stato può essere: ACTIVE, PAUSED, DELETED, ARCHIVED
+        - Il budget è in centesimi (es. 5000 = 50.00 EUR)
+        - L'obiettivo indica lo scopo della campagna (conversioni, traffico, ecc.)
+    """
+    try:
+        data = await _make_api_request(
+            f"{params.account_id}/campaigns",
+            params={
+                "fields": "id,name,objective,status,daily_budget,lifetime_budget,start_time,stop_time",
+                "limit": params.limit
+            }
+        )
+
+        campaigns = data.get("data", [])
+
+        if not campaigns:
+            return f"Nessuna campagna trovata per l'account {params.account_id}."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Campagne Pubblicitarie\n"]
+            lines.append(f"Account: {params.account_id}")
+            lines.append(f"Trovate {len(campaigns)} campagne\n")
+
+            for camp in campaigns:
+                lines.append(f"## {camp['name']} ({camp['id']})")
+                lines.append(f"- **Obiettivo**: {camp.get('objective', 'N/A')}")
+                lines.append(f"- **Stato**: {camp.get('status', 'N/A')}")
+
+                if 'daily_budget' in camp:
+                    budget = _format_currency(camp['daily_budget'])
+                    lines.append(f"- **Budget giornaliero**: {budget}")
+                elif 'lifetime_budget' in camp:
+                    budget = _format_currency(camp['lifetime_budget'])
+                    lines.append(f"- **Budget lifetime**: {budget}")
+
+                if 'start_time' in camp:
+                    lines.append(f"- **Inizio**: {camp['start_time']}")
+                if 'stop_time' in camp:
+                    lines.append(f"- **Fine**: {camp['stop_time']}")
+
+                lines.append("")
+
+            content = "\n".join(lines)
+            return _check_truncation(content, len(campaigns))
+
+        else:
+            result = {
+                "account_id": params.account_id,
+                "total": len(campaigns),
+                "count": len(campaigns),
+                "campaigns": campaigns
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_list_adsets",
+    annotations={
+        "title": "Lista Ad Set di una Campagna",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_list_adsets(params: ListAdSetsInput) -> str:
+    """
+    Elenca tutti gli ad set di una campagna specifica.
+
+    Gli ad set definiscono budget, scheduling, targeting e ottimizzazione
+    per gruppi di annunci all'interno di una campagna.
+
+    Args:
+        params (ListAdSetsInput): Parametri validati contenenti:
+            - campaign_id (str): ID della campagna
+            - limit (int): Numero massimo di ad set (default: 25)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Lista ad set con:
+            - ID e nome
+            - Stato (ACTIVE, PAUSED, ecc.)
+            - Budget giornaliero o lifetime
+            - Ottimizzazione e strategia di bid
+            - Eventi di ottimizzazione
+            - Date scheduling
+
+    Esempi d'uso:
+        - "Mostrami gli ad set della campagna 123456789"
+        - "Quali ad set sono attivi in questa campagna?"
+        - "Lista ad set con budget e targeting"
+    """
+    try:
+        data = await _make_api_request(
+            f"{params.campaign_id}/adsets",
+            params={
+                "fields": "id,name,status,daily_budget,lifetime_budget,optimization_goal,billing_event,start_time,end_time",
+                "limit": params.limit
+            }
+        )
+
+        adsets = data.get("data", [])
+
+        if not adsets:
+            return f"Nessun ad set trovato per la campagna {params.campaign_id}."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Ad Set\n"]
+            lines.append(f"Campagna: {params.campaign_id}")
+            lines.append(f"Trovati {len(adsets)} ad set\n")
+
+            for adset in adsets:
+                lines.append(f"## {adset['name']} ({adset['id']})")
+                lines.append(f"- **Stato**: {adset.get('status', 'N/A')}")
+
+                if 'daily_budget' in adset:
+                    budget = _format_currency(adset['daily_budget'])
+                    lines.append(f"- **Budget giornaliero**: {budget}")
+                elif 'lifetime_budget' in adset:
+                    budget = _format_currency(adset['lifetime_budget'])
+                    lines.append(f"- **Budget lifetime**: {budget}")
+
+                if 'optimization_goal' in adset:
+                    lines.append(f"- **Ottimizzazione**: {adset['optimization_goal']}")
+                if 'billing_event' in adset:
+                    lines.append(f"- **Billing**: {adset['billing_event']}")
+
+                if 'start_time' in adset:
+                    lines.append(f"- **Inizio**: {adset['start_time']}")
+                if 'end_time' in adset:
+                    lines.append(f"- **Fine**: {adset['end_time']}")
+
+                lines.append("")
+
+            content = "\n".join(lines)
+            return _check_truncation(content, len(adsets))
+
+        else:
+            result = {
+                "campaign_id": params.campaign_id,
+                "total": len(adsets),
+                "count": len(adsets),
+                "adsets": adsets
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_list_ads",
+    annotations={
+        "title": "Lista Annunci di un Ad Set",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_list_ads(params: ListAdsInput) -> str:
+    """
+    Elenca tutti gli annunci di un ad set specifico.
+
+    Gli annunci (ads) sono il livello più granulare della struttura pubblicitaria
+    e contengono il creative effettivo mostrato agli utenti.
+
+    Args:
+        params (ListAdsInput): Parametri validati contenenti:
+            - adset_id (str): ID dell'ad set
+            - limit (int): Numero massimo di ads (default: 25)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Lista annunci con:
+            - ID e nome
+            - Stato
+            - ID creative associato
+            - Informazioni base sul targeting
+            - Link al creative completo
+
+    Esempi d'uso:
+        - "Mostrami gli annunci dell'ad set 123456789"
+        - "Quali ads sono attivi in questo ad set?"
+        - "Lista tutti gli annunci con i loro creative"
+
+    Note:
+        - Per dettagli completi sul creative, usa meta_ads_get_creative
+    """
+    try:
+        data = await _make_api_request(
+            f"{params.adset_id}/ads",
+            params={
+                "fields": "id,name,status,creative{id,name}",
+                "limit": params.limit
+            }
+        )
+
+        ads = data.get("data", [])
+
+        if not ads:
+            return f"Nessun annuncio trovato per l'ad set {params.adset_id}."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Annunci\n"]
+            lines.append(f"Ad Set: {params.adset_id}")
+            lines.append(f"Trovati {len(ads)} annunci\n")
+
+            for ad in ads:
+                lines.append(f"## {ad['name']} ({ad['id']})")
+                lines.append(f"- **Stato**: {ad.get('status', 'N/A')}")
+
+                if 'creative' in ad:
+                    creative = ad['creative']
+                    lines.append(f"- **Creative ID**: {creative.get('id', 'N/A')}")
+                    lines.append(f"- **Creative Nome**: {creative.get('name', 'N/A')}")
+
+                lines.append(f"- *Usa meta_ads_get_creative con ID {ad['id']} per dettagli completi*")
+                lines.append("")
+
+            content = "\n".join(lines)
+            return _check_truncation(content, len(ads))
+
+        else:
+            result = {
+                "adset_id": params.adset_id,
+                "total": len(ads),
+                "count": len(ads),
+                "ads": ads
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_get_insights",
+    annotations={
+        "title": "Ottieni Metriche Performance",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_get_insights(params: GetInsightsInput) -> str:
+    """
+    Recupera metriche di performance dettagliate per account, campagne, ad set o singoli ads.
+
+    Fornisce accesso completo all'Insights API di Meta con metriche chiave come
+    impressions, clicks, spend, conversions, CPC, CTR, ROAS e molto altro.
+
+    Args:
+        params (GetInsightsInput): Parametri validati contenenti:
+            - object_id (str): ID dell'oggetto da analizzare
+            - level (str): Livello aggregazione ('account', 'campaign', 'adset', 'ad')
+            - date_preset (DatePreset): Periodo temporale preset (es. 'last_30d', 'this_month')
+            - since (str): Data inizio custom (formato YYYY-MM-DD, es. '2025-01-01')
+            - until (str): Data fine custom (formato YYYY-MM-DD, es. '2025-01-31')
+            - time_increment (int): Granularità giorni (1=daily, vuoto=totale periodo)
+            - response_format (ResponseFormat): Formato output
+
+        Note: Se specifichi 'since' e 'until', il 'date_preset' viene ignorato.
+
+    Returns:
+        str: Metriche complete con:
+            - Impressions (visualizzazioni)
+            - Clicks (clic ricevuti)
+            - Spend (spesa in valuta account)
+            - CPM (costo per mille impressioni)
+            - CPC (costo per clic)
+            - CTR (click-through rate %)
+            - Reach (utenti unici raggiunti)
+            - Frequency (frequenza media)
+            - Conversions (azioni completate)
+            - Cost per result (costo per conversione)
+            - ROAS (return on ad spend, se disponibile)
+
+        Se time_increment è specificato, restituisce metriche aggregate per periodo.
+
+    Esempi d'uso:
+        - "Mostrami le performance dell'account nell'ultimo mese"
+        - "Quanto ho speso questa settimana sulla campagna 123?"
+        - "Qual è il CTR degli ultimi 7 giorni per questo ad set?"
+        - "Dammi i dati giornalieri dell'ultima settimana"
+        - "Mostrami le metriche dal 1 gennaio al 31 gennaio 2025"
+        - "Analizza le performance dal 2024-12-01 al 2024-12-31"
+
+    Note:
+        - I valori monetari sono in centesimi
+        - Le conversions dipendono dal pixel/events configurati
+        - ROAS richiede impostazione valore conversioni
+        - Alcune metriche potrebbero non essere disponibili per tutti gli obiettivi
+        - Range massimo: 37 mesi (con alcune limitazioni per breakdown)
+    """
+    try:
+        request_params = {
+            "fields": "impressions,clicks,spend,cpm,cpc,ctr,reach,frequency,actions,cost_per_action_type,action_values",
+            "level": params.level
+        }
+
+        # Usa date personalizzate se fornite, altrimenti usa preset
+        if params.since and params.until:
+            request_params["time_range"] = json.dumps({
+                "since": params.since,
+                "until": params.until
+            })
+            date_info = f"{params.since} - {params.until}"
+        else:
+            request_params["date_preset"] = params.date_preset.value
+            date_info = params.date_preset.value
+
+        if params.time_increment:
+            request_params["time_increment"] = params.time_increment
+
+        data = await _make_api_request(
+            f"{params.object_id}/insights",
+            params=request_params
+        )
+
+        insights = data.get("data", [])
+
+        if not insights:
+            return f"Nessun dato insight disponibile per {params.object_id} nel periodo selezionato."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Metriche Performance\n"]
+            lines.append(f"Oggetto: {params.object_id}")
+            lines.append(f"Periodo: {date_info}")
+            lines.append(f"Livello: {params.level}\n")
+
+            for idx, insight in enumerate(insights, 1):
+                if params.time_increment:
+                    period = f"{insight.get('date_start', 'N/A')} - {insight.get('date_stop', 'N/A')}"
+                    lines.append(f"## Periodo {idx}: {period}")
+                else:
+                    lines.append(f"## Metriche Totali")
+
+                lines.append(f"- **Impressions**: {insight.get('impressions', '0'):,}")
+                lines.append(f"- **Clicks**: {insight.get('clicks', '0'):,}")
+                lines.append(f"- **Spend**: {_format_currency(insight.get('spend', '0'))}")
+                lines.append(f"- **CPM**: {_format_currency(insight.get('cpm', '0'))}")
+                lines.append(f"- **CPC**: {_format_currency(insight.get('cpc', '0'))}")
+
+                ctr = insight.get('ctr', 0)
+                lines.append(f"- **CTR**: {_format_percentage(float(ctr))}")
+
+                lines.append(f"- **Reach**: {insight.get('reach', '0'):,}")
+                lines.append(f"- **Frequency**: {insight.get('frequency', '0')}")
+
+                # Conversioni
+                if 'actions' in insight:
+                    lines.append("- **Conversioni**:")
+                    for action in insight['actions'][:5]:  # Primi 5 tipi
+                        action_type = action.get('action_type', 'unknown')
+                        value = action.get('value', '0')
+                        lines.append(f"  - {action_type}: {value}")
+
+                lines.append("")
+
+            content = "\n".join(lines)
+            return _check_truncation(content, len(insights))
+
+        else:
+            result = {
+                "object_id": params.object_id,
+                "level": params.level,
+                "period": date_info,
+                "total": len(insights),
+                "insights": insights
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_get_creative",
+    annotations={
+        "title": "Ottieni Dettagli Creative Annuncio",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_get_creative(params: GetCreativeInput) -> str:
+    """
+    Recupera i dettagli completi del creative di un annuncio specifico.
+
+    Il creative contiene tutti gli elementi visuali e testuali dell'annuncio:
+    testi, immagini, video, link, call-to-action e configurazione placement.
+
+    Args:
+        params (GetCreativeInput): Parametri validati contenenti:
+            - ad_id (str): ID dell'annuncio
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Dettagli creative completi:
+            - ID creative
+            - Nome creative
+            - Titolo annuncio
+            - Body text (testo principale)
+            - Descrizione/caption
+            - Call to action type (es. LEARN_MORE, SHOP_NOW)
+            - Link URL
+            - Image hash/URL (per annunci immagine)
+            - Video ID (per annunci video)
+            - Page ID e Instagram actor ID
+            - Object story spec (configurazione placement)
+            - Asset feed spec (per annunci dinamici)
+
+    Esempi d'uso:
+        - "Mostrami il creative dell'annuncio 123456789"
+        - "Quali testi e immagini usa questo ad?"
+        - "Dammi il link e la CTA di questo annuncio"
+
+    Note:
+        - La struttura dati varia in base al formato annuncio (immagine, video, carousel, ecc.)
+        - Per annunci dinamici, guarda asset_feed_spec
+        - Le immagini sono identificate da hash, non URL diretti
+    """
+    try:
+        # Prima ottieni l'ad per ricavare il creative ID
+        ad_data = await _make_api_request(
+            params.ad_id,
+            params={"fields": "creative{id,name,title,body,image_url,link_url,call_to_action_type,object_story_spec,asset_feed_spec}"}
+        )
+
+        if 'creative' not in ad_data:
+            return f"Nessun creative trovato per l'annuncio {params.ad_id}."
+
+        creative = ad_data['creative']
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Dettagli Creative\n"]
+            lines.append(f"Annuncio ID: {params.ad_id}")
+            lines.append(f"Creative ID: {creative.get('id', 'N/A')}\n")
+
+            if 'name' in creative:
+                lines.append(f"## {creative['name']}\n")
+
+            if 'title' in creative:
+                lines.append(f"### Titolo")
+                lines.append(f"{creative['title']}\n")
+
+            if 'body' in creative:
+                lines.append(f"### Body Text")
+                lines.append(f"{creative['body']}\n")
+
+            if 'link_url' in creative:
+                lines.append(f"**Link**: {creative['link_url']}")
+
+            if 'call_to_action_type' in creative:
+                lines.append(f"**Call to Action**: {creative['call_to_action_type']}")
+
+            if 'image_url' in creative:
+                lines.append(f"**Immagine**: {creative['image_url']}")
+
+            # Object story spec
+            if 'object_story_spec' in creative:
+                lines.append("\n### Configurazione Placement")
+                spec = creative['object_story_spec']
+                if 'page_id' in spec:
+                    lines.append(f"- **Page ID**: {spec['page_id']}")
+                if 'instagram_actor_id' in spec:
+                    lines.append(f"- **Instagram Actor ID**: {spec['instagram_actor_id']}")
+                if 'link_data' in spec:
+                    link_data = spec['link_data']
+                    if 'link' in link_data:
+                        lines.append(f"- **Link**: {link_data['link']}")
+                    if 'message' in link_data:
+                        lines.append(f"- **Messaggio**: {link_data['message']}")
+
+            # Asset feed (per annunci dinamici)
+            if 'asset_feed_spec' in creative:
+                lines.append("\n### Asset Feed (Annuncio Dinamico)")
+                lines.append("*Configurazione per annunci dinamici presente*")
+
+            content = "\n".join(lines)
+            return content
+
+        else:
+            result = {
+                "ad_id": params.ad_id,
+                "creative": creative
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_generate_report",
+    annotations={
+        "title": "Genera Report con Breakdown Demografici",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def meta_ads_generate_report(params: GenerateReportInput) -> str:
+    """
+    Genera report avanzati con breakdown per età, genere, paese, regione e placement.
+
+    Questo tool fornisce analisi approfondite segmentando le performance per diverse
+    dimensioni demografiche e geografiche, permettendo di identificare il pubblico
+    più performante e ottimizzare il targeting.
+
+    Args:
+        params (GenerateReportInput): Parametri validati contenenti:
+            - object_id (str): ID oggetto da analizzare (account, campagna, ad set, ad)
+            - breakdowns (List[BreakdownType]): Dimensioni di segmentazione (max 4):
+                * 'age': Fasce d'età (18-24, 25-34, 35-44, 45-54, 55-64, 65+)
+                * 'gender': Genere (male, female, unknown)
+                * 'country': Paese (codice ISO, es. IT, US, GB)
+                * 'region': Regione geografica
+                * 'publisher_platform': Placement (Facebook, Instagram, Messenger, Audience Network)
+                * 'device_platform': Piattaforma device (mobile, desktop)
+                * 'age,gender': Combinazione età+genere
+            - date_preset (DatePreset): Periodo analisi preset (default: last_30d)
+            - since (str): Data inizio custom (formato YYYY-MM-DD)
+            - until (str): Data fine custom (formato YYYY-MM-DD)
+            - response_format (ResponseFormat): Formato output
+
+        Note: Se specifichi 'since' e 'until', il 'date_preset' viene ignorato.
+
+    Returns:
+        str: Report segmentato con metriche per ogni combinazione di breakdown:
+            - Impressions per segmento
+            - Clicks per segmento
+            - Spend per segmento
+            - CTR per segmento
+            - CPC per segmento
+            - Conversioni per segmento (se disponibili)
+
+        Il report evidenzia i segmenti più performanti e quelli meno efficaci.
+
+    Esempi d'uso:
+        - "Mostrami le performance per fascia d'età e genere negli ultimi 30 giorni"
+        - "Quale paese ha il CTR migliore?"
+        - "Come performano gli annunci su Instagram vs Facebook?"
+        - "Analizza la distribuzione per età dell'ultima settimana"
+        - "Report per genere dal 1 dicembre al 31 dicembre 2024"
+        - "Breakdown per paese dal 2025-01-01 al 2025-01-31"
+
+    Note:
+        - I breakdown multipli moltiplicano le righe (es. 6 età x 2 generi = 12 segmenti)
+        - Alcuni breakdown non sono compatibili tra loro
+        - Dati limitati a 394 giorni per breakdown demografici con Reach
+        - Segmenti con pochi dati potrebbero non essere mostrati per privacy
+    """
+    try:
+        breakdown_str = ",".join([b.value for b in params.breakdowns])
+
+        request_params = {
+            "fields": "impressions,clicks,spend,cpc,ctr,reach,actions,cost_per_action_type",
+            "breakdowns": breakdown_str
+        }
+
+        # Usa date personalizzate se fornite, altrimenti usa preset
+        if params.since and params.until:
+            request_params["time_range"] = json.dumps({
+                "since": params.since,
+                "until": params.until
+            })
+            date_info = f"{params.since} - {params.until}"
+        else:
+            request_params["date_preset"] = params.date_preset.value
+            date_info = params.date_preset.value
+
+        data = await _make_api_request(
+            f"{params.object_id}/insights",
+            params=request_params
+        )
+
+        insights = data.get("data", [])
+
+        if not insights:
+            return f"Nessun dato disponibile per i breakdown richiesti nel periodo {date_info}."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# Report con Breakdown\n"]
+            lines.append(f"Oggetto: {params.object_id}")
+            lines.append(f"Periodo: {date_info}")
+            lines.append(f"Breakdown: {breakdown_str}\n")
+            lines.append(f"Totale segmenti: {len(insights)}\n")
+
+            # Raggruppa e mostra top performers
+            sorted_insights = sorted(insights, key=lambda x: int(x.get('clicks', 0)), reverse=True)
+
+            for idx, insight in enumerate(sorted_insights[:20], 1):  # Top 20
+                # Costruisci il titolo del segmento
+                segment_parts = []
+                if 'age' in insight:
+                    segment_parts.append(f"Età: {insight['age']}")
+                if 'gender' in insight:
+                    gender_map = {'male': 'Uomo', 'female': 'Donna', 'unknown': 'Non specificato'}
+                    segment_parts.append(f"Genere: {gender_map.get(insight['gender'], insight['gender'])}")
+                if 'country' in insight:
+                    segment_parts.append(f"Paese: {insight['country']}")
+                if 'region' in insight:
+                    segment_parts.append(f"Regione: {insight['region']}")
+                if 'publisher_platform' in insight:
+                    segment_parts.append(f"Platform: {insight['publisher_platform']}")
+                if 'device_platform' in insight:
+                    segment_parts.append(f"Device: {insight['device_platform']}")
+
+                segment_title = " | ".join(segment_parts) if segment_parts else f"Segmento {idx}"
+                lines.append(f"## {idx}. {segment_title}")
+
+                lines.append(f"- **Impressions**: {insight.get('impressions', '0'):,}")
+                lines.append(f"- **Clicks**: {insight.get('clicks', '0'):,}")
+                lines.append(f"- **Spend**: {_format_currency(insight.get('spend', '0'))}")
+
+                ctr = float(insight.get('ctr', 0))
+                lines.append(f"- **CTR**: {_format_percentage(ctr)}")
+                lines.append(f"- **CPC**: {_format_currency(insight.get('cpc', '0'))}")
+
+                if 'reach' in insight:
+                    lines.append(f"- **Reach**: {insight['reach']:,}")
+
+                if 'actions' in insight:
+                    total_actions = sum(int(a.get('value', 0)) for a in insight['actions'])
+                    lines.append(f"- **Conversioni totali**: {total_actions}")
+
+                lines.append("")
+
+            if len(sorted_insights) > 20:
+                lines.append(f"\n*Mostrati i top 20 segmenti su {len(insights)} totali*")
+                lines.append("*Usa filtri o parametri diversi per vedere altri segmenti*\n")
+
+            content = "\n".join(lines)
+            return _check_truncation(content, len(insights))
+
+        else:
+            result = {
+                "object_id": params.object_id,
+                "breakdowns": breakdown_str,
+                "period": date_info,
+                "total_segments": len(insights),
+                "insights": insights
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+if __name__ == "__main__":
+    # Avvia il server MCP
+    mcp.run()
