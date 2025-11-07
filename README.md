@@ -133,19 +133,41 @@ Dovresti vedere i dettagli del tuo profilo Facebook.
 
 ## Configurazione per Claude Code
 
-Per usare il server con Claude Code CLI, aggiungi questa configurazione al file `claude_desktop_config.json`:
+### Metodo 1: Installazione Automatica (Consigliato)
 
-**Linux/macOS:** `~/.config/Claude/claude_desktop_config.json`
+```bash
+# 1. Clona il repository
+git clone https://github.com/mikdeangelis/mcp-meta-ads.git
+cd mcp-meta-ads
 
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+# 2. Crea ambiente virtuale e installa dipendenze
+python3 -m venv .venv
+source .venv/bin/activate  # Su Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# 3. Configura il token
+export META_ACCESS_TOKEN="your_token_here"
+
+# 4. Aggiungi l'MCP a Claude Code
+claude mcp add meta-ads \
+  --command ".venv/bin/python" \
+  --arg "$(pwd)/meta_ads_mcp.py"
+```
+
+### Metodo 2: Configurazione Manuale
+
+Modifica il file di configurazione di Claude Code:
+
+**macOS/Linux:** `~/.config/claude-code/config.json`
+**Windows:** `%APPDATA%\claude-code\config.json`
 
 ```json
 {
   "mcpServers": {
     "meta-ads": {
-      "command": "python",
+      "command": "/path/to/mcp-meta-ads/.venv/bin/python",
       "args": [
-        "/path/to/meta-ads-mcp-server/meta_ads_mcp.py"
+        "/path/to/mcp-meta-ads/meta_ads_mcp.py"
       ],
       "env": {
         "META_ACCESS_TOKEN": "your_token_here"
@@ -155,9 +177,39 @@ Per usare il server con Claude Code CLI, aggiungi questa configurazione al file 
 }
 ```
 
-Sostituisci:
-- `/path/to/meta-ads-mcp-server/` con il percorso effettivo
-- `your_token_here` con il tuo access token
+Sostituisci i percorsi con quelli effettivi sul tuo sistema.
+
+### Verifica Installazione
+
+```bash
+# Lista MCP servers installati
+claude mcp list
+
+# Dovresti vedere: meta-ads ✓ Connected
+```
+
+## Configurazione per Claude Desktop
+
+Se invece vuoi usare questo MCP con Claude Desktop (app desktop), aggiungi al file `claude_desktop_config.json`:
+
+**Linux/macOS:** `~/.config/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "meta-ads": {
+      "command": "python",
+      "args": [
+        "/path/to/mcp-meta-ads/meta_ads_mcp.py"
+      ],
+      "env": {
+        "META_ACCESS_TOKEN": "your_token_here"
+      }
+    }
+  }
+}
+```
 
 ## Uso
 
