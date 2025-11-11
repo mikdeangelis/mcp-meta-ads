@@ -14,6 +14,12 @@ from datetime import datetime, timedelta
 import httpx
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Carica variabili d'ambiente dal file .env
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Inizializza il server MCP
 mcp = FastMCP("meta_ads_mcp")
@@ -245,6 +251,101 @@ class GenerateReportInput(BaseModel):
         if (since and not v) or (v and not since):
             raise ValueError("Se usi date personalizzate, devi specificare sia 'since' che 'until'")
         return v
+
+
+class AdSetStatus(str, Enum):
+    """Stati possibili per un ad set."""
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+
+
+class UpdateAdSetTargetingInput(BaseModel):
+    """Input per aggiornare il targeting di un ad set."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    adset_id: str = Field(
+        ...,
+        description="ID dell'ad set da modificare",
+        min_length=1
+    )
+    age_min: Optional[int] = Field(
+        default=None,
+        description="Età minima (18-65)",
+        ge=18,
+        le=65
+    )
+    age_max: Optional[int] = Field(
+        default=None,
+        description="Età massima (18-65)",
+        ge=18,
+        le=65
+    )
+    genders: Optional[List[int]] = Field(
+        default=None,
+        description="Lista generi: 1=uomini, 2=donne. Lasciare None per tutti"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('genders')
+    @classmethod
+    def validate_genders(cls, v: Optional[List[int]]) -> Optional[List[int]]:
+        """Valida che i valori di genere siano corretti."""
+        if v is not None:
+            for gender in v:
+                if gender not in [1, 2]:
+                    raise ValueError("I valori di genere devono essere 1 (uomini) o 2 (donne)")
+        return v
+
+    @field_validator('age_max')
+    @classmethod
+    def validate_age_range(cls, v: Optional[int], info) -> Optional[int]:
+        """Valida che age_max sia >= age_min."""
+        age_min = info.data.get('age_min')
+        if age_min and v and v < age_min:
+            raise ValueError("age_max deve essere maggiore o uguale ad age_min")
+        return v
+
+
+class UpdateAdSetBudgetInput(BaseModel):
+    """Input per aggiornare il budget di un ad set."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    adset_id: str = Field(
+        ...,
+        description="ID dell'ad set da modificare",
+        min_length=1
+    )
+    daily_budget: int = Field(
+        ...,
+        description="Budget giornaliero in centesimi (es. 1000 = €10.00)",
+        ge=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+
+class UpdateAdSetStatusInput(BaseModel):
+    """Input per cambiare lo stato di un ad set."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    adset_id: str = Field(
+        ...,
+        description="ID dell'ad set da modificare",
+        min_length=1
+    )
+    status: AdSetStatus = Field(
+        ...,
+        description="Nuovo stato: ACTIVE o PAUSED"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
 
 
 # Funzioni di utilità condivise
@@ -1137,6 +1238,348 @@ async def meta_ads_generate_report(params: GenerateReportInput) -> str:
                 "period": date_info,
                 "total_segments": len(insights),
                 "insights": insights
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_update_adset_targeting",
+    annotations={
+        "title": "Aggiorna Targeting Ad Set",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_update_adset_targeting(params: UpdateAdSetTargetingInput) -> str:
+    """
+    Aggiorna il targeting demografico di un ad set (età e genere).
+
+    Questo tool permette di modificare le impostazioni di età minima/massima
+    e genere del pubblico target di un ad set esistente.
+
+    Args:
+        params (UpdateAdSetTargetingInput): Parametri validati contenenti:
+            - adset_id (str): ID dell'ad set da modificare
+            - age_min (Optional[int]): Età minima (18-65)
+            - age_max (Optional[int]): Età massima (18-65)
+            - genders (Optional[List[int]]): Lista generi (1=uomini, 2=donne)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Conferma delle modifiche applicate con dettagli del nuovo targeting
+
+    Esempi d'uso:
+        - "Imposta età 25-44 per ad set 123456789"
+        - "Cambia targeting a solo donne 25-54 anni"
+        - "Restringe ad set a uomini 35-65 anni"
+
+    Note:
+        - Se non specifichi age_min o age_max, mantiene il valore esistente
+        - Se non specifichi genders, targettizza tutti i generi
+        - Per solo donne: genders=[2]
+        - Per solo uomini: genders=[1]
+        - Per tutti i generi: genders=None o non specificare
+    """
+    try:
+        # Prima recupera il targeting attuale
+        current_data = await _make_api_request(
+            params.adset_id,
+            params={"fields": "name,targeting"}
+        )
+
+        current_targeting = current_data.get('targeting', {})
+        adset_name = current_data.get('name', params.adset_id)
+
+        # Prepara il nuovo targeting (mantiene le altre impostazioni)
+        updated_targeting = current_targeting.copy()
+
+        # Aggiorna età se specificata
+        if params.age_min is not None:
+            updated_targeting['age_min'] = params.age_min
+        if params.age_max is not None:
+            updated_targeting['age_max'] = params.age_max
+
+        # Aggiorna genere se specificato
+        if params.genders is not None:
+            updated_targeting['genders'] = params.genders
+        elif 'genders' in updated_targeting:
+            # Se genders non è specificato, rimuovilo per targettizzare tutti
+            del updated_targeting['genders']
+
+        # Esegui l'aggiornamento
+        update_data = await _make_api_request(
+            params.adset_id,
+            method="POST",
+            params={
+                "targeting": json.dumps(updated_targeting)
+            }
+        )
+
+        if not update_data.get('success'):
+            return f"Errore nell'aggiornamento dell'ad set {params.adset_id}"
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Targeting Ad Set Aggiornato\n"]
+            lines.append(f"**Ad Set**: {adset_name}")
+            lines.append(f"**ID**: {params.adset_id}\n")
+
+            lines.append("## Nuovo Targeting Demografico\n")
+
+            # Età
+            age_min = updated_targeting.get('age_min', 18)
+            age_max = updated_targeting.get('age_max', 65)
+            lines.append(f"- **Età**: {age_min}-{age_max} anni")
+
+            # Genere
+            genders = updated_targeting.get('genders')
+            if genders:
+                gender_map = {1: 'Uomini', 2: 'Donne'}
+                gender_str = ', '.join([gender_map.get(g, str(g)) for g in genders])
+                lines.append(f"- **Genere**: {gender_str}")
+            else:
+                lines.append(f"- **Genere**: Tutti")
+
+            # Mostra cosa è cambiato
+            changes = []
+            if params.age_min is not None or params.age_max is not None:
+                old_age_min = current_targeting.get('age_min', 18)
+                old_age_max = current_targeting.get('age_max', 65)
+                if old_age_min != age_min or old_age_max != age_max:
+                    changes.append(f"Età cambiata da {old_age_min}-{old_age_max} a {age_min}-{age_max}")
+
+            if params.genders is not None:
+                old_genders = current_targeting.get('genders')
+                if old_genders != genders:
+                    changes.append("Filtro genere aggiornato")
+
+            if changes:
+                lines.append("\n## Modifiche Applicate\n")
+                for change in changes:
+                    lines.append(f"✓ {change}")
+
+            lines.append("\n*Le altre impostazioni di targeting (geografia, interessi, ecc.) sono rimaste invariate*")
+
+            return "\n".join(lines)
+
+        else:
+            result = {
+                "success": True,
+                "adset_id": params.adset_id,
+                "adset_name": adset_name,
+                "updated_targeting": updated_targeting
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_update_adset_budget",
+    annotations={
+        "title": "Aggiorna Budget Ad Set",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_update_adset_budget(params: UpdateAdSetBudgetInput) -> str:
+    """
+    Aggiorna il budget giornaliero di un ad set.
+
+    Questo tool permette di modificare il budget giornaliero allocato
+    a un ad set esistente.
+
+    Args:
+        params (UpdateAdSetBudgetInput): Parametri validati contenenti:
+            - adset_id (str): ID dell'ad set da modificare
+            - daily_budget (int): Nuovo budget giornaliero in centesimi (es. 1000 = €10)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Conferma della modifica con vecchio e nuovo budget
+
+    Esempi d'uso:
+        - "Imposta budget €15/giorno per ad set 123456789" (daily_budget=1500)
+        - "Aumenta budget a €25 al giorno" (daily_budget=2500)
+        - "Riduci budget a €5 giornalieri" (daily_budget=500)
+
+    Note:
+        - Il budget è in centesimi: 1000 = €10.00
+        - Budget minimo: €1.00 (100 centesimi)
+        - La modifica ha effetto immediato
+        - Non cambia il lifetime_budget se configurato
+    """
+    try:
+        # Prima recupera i dati attuali
+        current_data = await _make_api_request(
+            params.adset_id,
+            params={"fields": "name,daily_budget,status"}
+        )
+
+        adset_name = current_data.get('name', params.adset_id)
+        old_budget = int(current_data.get('daily_budget', 0))
+        status = current_data.get('status', 'UNKNOWN')
+
+        # Esegui l'aggiornamento
+        update_data = await _make_api_request(
+            params.adset_id,
+            method="POST",
+            params={
+                "daily_budget": params.daily_budget
+            }
+        )
+
+        if not update_data.get('success'):
+            return f"Errore nell'aggiornamento del budget per ad set {params.adset_id}"
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Budget Ad Set Aggiornato\n"]
+            lines.append(f"**Ad Set**: {adset_name}")
+            lines.append(f"**ID**: {params.adset_id}")
+            lines.append(f"**Status**: {status}\n")
+
+            lines.append("## Modifica Budget\n")
+            lines.append(f"- **Budget Precedente**: €{old_budget/100:.2f}/giorno")
+            lines.append(f"- **Nuovo Budget**: €{params.daily_budget/100:.2f}/giorno")
+
+            diff = params.daily_budget - old_budget
+            diff_pct = (diff / old_budget * 100) if old_budget > 0 else 0
+
+            if diff > 0:
+                lines.append(f"- **Variazione**: +€{diff/100:.2f} (+{diff_pct:.1f}%) 📈")
+            elif diff < 0:
+                lines.append(f"- **Variazione**: €{diff/100:.2f} ({diff_pct:.1f}%) 📉")
+            else:
+                lines.append(f"- **Variazione**: Nessuna modifica")
+
+            lines.append("\n*Il nuovo budget sarà applicato a partire dalla prossima auction*")
+
+            return "\n".join(lines)
+
+        else:
+            result = {
+                "success": True,
+                "adset_id": params.adset_id,
+                "adset_name": adset_name,
+                "old_budget_cents": old_budget,
+                "new_budget_cents": params.daily_budget,
+                "difference_cents": params.daily_budget - old_budget
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_update_adset_status",
+    annotations={
+        "title": "Cambia Stato Ad Set",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_update_adset_status(params: UpdateAdSetStatusInput) -> str:
+    """
+    Attiva o mette in pausa un ad set.
+
+    Questo tool permette di cambiare lo stato di un ad set tra
+    ACTIVE (attivo, mostra annunci) e PAUSED (in pausa, non mostra annunci).
+
+    Args:
+        params (UpdateAdSetStatusInput): Parametri validati contenenti:
+            - adset_id (str): ID dell'ad set da modificare
+            - status (AdSetStatus): Nuovo stato (ACTIVE o PAUSED)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Conferma del cambio di stato
+
+    Esempi d'uso:
+        - "Attiva ad set 123456789" (status=ACTIVE)
+        - "Metti in pausa ad set 987654321" (status=PAUSED)
+        - "Pausa tutti gli ad set della campagna" (chiamare per ogni ad set)
+
+    Note:
+        - Il cambio stato ha effetto immediato
+        - Ad set PAUSED non consumano budget
+        - Ad set ACTIVE iniziano subito a competere nelle auction
+        - La campagna deve essere attiva perché l'ad set possa essere attivo
+    """
+    try:
+        # Prima recupera i dati attuali
+        current_data = await _make_api_request(
+            params.adset_id,
+            params={"fields": "name,status,daily_budget"}
+        )
+
+        adset_name = current_data.get('name', params.adset_id)
+        old_status = current_data.get('status', 'UNKNOWN')
+        budget = int(current_data.get('daily_budget', 0))
+
+        # Se lo stato è già quello richiesto, comunica che non serve modificare
+        if old_status == params.status.value:
+            if params.response_format == ResponseFormat.MARKDOWN:
+                return f"# ℹ️ Nessuna Modifica Necessaria\n\nL'ad set **{adset_name}** è già nello stato **{params.status.value}**."
+            else:
+                result = {
+                    "success": True,
+                    "adset_id": params.adset_id,
+                    "adset_name": adset_name,
+                    "status": params.status.value,
+                    "changed": False,
+                    "message": "Ad set già nello stato richiesto"
+                }
+                return json.dumps(result, indent=2)
+
+        # Esegui l'aggiornamento
+        update_data = await _make_api_request(
+            params.adset_id,
+            method="POST",
+            params={
+                "status": params.status.value
+            }
+        )
+
+        if not update_data.get('success'):
+            return f"Errore nel cambio stato per ad set {params.adset_id}"
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Stato Ad Set Modificato\n"]
+            lines.append(f"**Ad Set**: {adset_name}")
+            lines.append(f"**ID**: {params.adset_id}")
+            lines.append(f"**Budget**: €{budget/100:.2f}/giorno\n")
+
+            lines.append("## Cambio Stato\n")
+            lines.append(f"- **Stato Precedente**: {old_status}")
+            lines.append(f"- **Nuovo Stato**: {params.status.value}")
+
+            if params.status == AdSetStatus.ACTIVE:
+                lines.append("\n✅ **L'ad set è ora ATTIVO** e sta competendo nelle auction.")
+                lines.append("Gli annunci inizieranno a essere mostrati in base al targeting configurato.")
+            else:
+                lines.append("\n⏸️ **L'ad set è ora IN PAUSA** e non sta spendendo budget.")
+                lines.append("Gli annunci non verranno mostrati finché non riattiverai l'ad set.")
+
+            return "\n".join(lines)
+
+        else:
+            result = {
+                "success": True,
+                "adset_id": params.adset_id,
+                "adset_name": adset_name,
+                "old_status": old_status,
+                "new_status": params.status.value,
+                "changed": True
             }
             return json.dumps(result, indent=2)
 
