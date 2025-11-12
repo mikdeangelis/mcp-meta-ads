@@ -470,22 +470,22 @@ class CreateAdSetInput(BaseModel):
     )
     bid_amount: Optional[int] = Field(
         default=None,
-        description="Importo bid in centesimi (opzionale, Meta ottimizza automaticamente se non specificato)",
+        description="Importo bid in centesimi. OBBLIGATORIO per optimization goals come LINK_CLICKS, LANDING_PAGE_VIEWS, ecc.",
         ge=1
     )
     daily_budget: Optional[int] = Field(
         default=None,
-        description="Budget giornaliero in centesimi (es. 2000 = €20). Richiesto se campagna non ha budget",
+        description="Budget giornaliero in centesimi (es. 2000 = €20). NON usare se la campagna ha già un budget. Richiesto solo se la campagna non ha budget",
         ge=100
     )
     lifetime_budget: Optional[int] = Field(
         default=None,
-        description="Budget lifetime in centesimi (es. 5000 = €50). Alternativa a daily_budget",
+        description="Budget lifetime in centesimi (es. 5000 = €50). Alternativa a daily_budget. NON usare se la campagna ha già un budget",
         ge=100
     )
     targeting: Dict[str, Any] = Field(
         ...,
-        description="Oggetto targeting con geo_locations (es: {'geo_locations': {'countries': ['IT']}}), age_min, age_max, genders"
+        description="Oggetto targeting. OBBLIGATORI: geo_locations (paesi/regioni/città), targeting_automation.advantage_audience (0 o 1). OPZIONALI: age_min, age_max, genders"
     )
     start_time: Optional[str] = Field(
         default=None,
@@ -507,9 +507,18 @@ class CreateAdSetInput(BaseModel):
     @field_validator('targeting')
     @classmethod
     def validate_targeting(cls, v: Dict[str, Any]) -> Dict[str, Any]:
-        """Valida che il targeting abbia almeno geo_locations."""
+        """Valida che il targeting abbia i campi obbligatori."""
         if 'geo_locations' not in v:
-            raise ValueError("Il targeting deve includere almeno 'geo_locations' con paesi, regioni o città")
+            raise ValueError("Il targeting deve includere 'geo_locations' con paesi, regioni o città")
+
+        # Meta API richiede il flag advantage_audience (0 o 1)
+        if 'targeting_automation' not in v:
+            raise ValueError("Il targeting deve includere 'targeting_automation' con advantage_audience (0 o 1)")
+
+        targeting_auto = v.get('targeting_automation', {})
+        if 'advantage_audience' not in targeting_auto:
+            raise ValueError("targeting_automation deve includere 'advantage_audience' (0=disabilitato, 1=abilitato)")
+
         return v
 
     @field_validator('daily_budget')
@@ -552,24 +561,14 @@ async def _make_api_request(
     async with httpx.AsyncClient() as client:
         url = f"{API_BASE_URL}/{endpoint}"
 
-        # AdSet creation richiede form-data invece di query string
-        if method.upper() == "POST" and endpoint.endswith('/adsets'):
-            response = await client.post(
-                url,
-                data=params,
-                timeout=DEFAULT_TIMEOUT,
-                **kwargs
-            )
-        else:
-            # Per tutto il resto (incluso campaign creation), usa query string
-            response = await client.request(
-                method,
-                url,
-                params=params,
-                timeout=DEFAULT_TIMEOUT,
-                **kwargs
-            )
-
+        # Meta Graph API accetta parametri come query string per tutte le operazioni
+        response = await client.request(
+            method,
+            url,
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+            **kwargs
+        )
         response.raise_for_status()
         return response.json()
 
@@ -580,8 +579,29 @@ def _handle_api_error(e: Exception) -> str:
         if e.response.status_code == 400:
             try:
                 error_data = e.response.json()
-                error_msg = error_data.get("error", {}).get("message", "Richiesta non valida")
-                return f"Errore: {error_msg}. Verifica i parametri della richiesta."
+                error_obj = error_data.get("error", {})
+
+                # Estrai tutti i campi utili
+                error_msg = error_obj.get("message", "Richiesta non valida")
+                error_code = error_obj.get("code", "")
+                error_subcode = error_obj.get("error_subcode", "")
+                error_user_msg = error_obj.get("error_user_msg", "")
+                error_user_title = error_obj.get("error_user_title", "")
+                fbtrace_id = error_obj.get("fbtrace_id", "")
+
+                # Log completo per debug
+                full_error = f"Errore: {error_msg}"
+                if error_code:
+                    full_error += f"\nCode: {error_code}"
+                if error_subcode:
+                    full_error += f"\nSubcode: {error_subcode}"
+                if error_user_title:
+                    full_error += f"\nTitolo: {error_user_title}"
+                if error_user_msg:
+                    full_error += f"\nDettagli: {error_user_msg}"
+                if fbtrace_id:
+                    full_error += f"\nTrace ID: {fbtrace_id}"
+                return full_error
             except:
                 return "Errore: Richiesta non valida. Controlla i parametri forniti."
         elif e.response.status_code == 401:
@@ -1921,9 +1941,9 @@ async def meta_ads_create_adset(params: CreateAdSetInput) -> str:
             - optimization_goal (OptimizationGoal): Obiettivo ottimizzazione (REACH, IMPRESSIONS,
               LINK_CLICKS, LANDING_PAGE_VIEWS, OFFSITE_CONVERSIONS, QUALITY_LEAD, VALUE, THRUPLAY)
             - billing_event (BillingEvent): Evento fatturazione (IMPRESSIONS, LINK_CLICKS, THRUPLAY)
-            - targeting (Dict): Oggetto targeting con almeno geo_locations. Esempio:
-              {'geo_locations': {'countries': ['IT']}, 'age_min': 25, 'age_max': 55, 'genders': [1, 2]}
-            - bid_amount (Optional[int]): Importo bid in centesimi (opzionale, Meta ottimizza se non specificato)
+            - targeting (Dict): Oggetto targeting. OBBLIGATORI: geo_locations e targeting_automation.advantage_audience. Esempio:
+              {'geo_locations': {'countries': ['IT']}, 'age_min': 25, 'age_max': 55, 'targeting_automation': {'advantage_audience': 0}}
+            - bid_amount (Optional[int]): Importo bid in centesimi. OBBLIGATORIO per LINK_CLICKS, LANDING_PAGE_VIEWS e altri goals
             - daily_budget (Optional[int]): Budget giornaliero in centesimi (se campagna senza budget)
             - lifetime_budget (Optional[int]): Budget lifetime in centesimi (alternativa a daily_budget)
             - start_time (Optional[str]): Data/ora inizio (ISO 8601, es: '2025-01-15T00:00:00+0100')
@@ -1940,26 +1960,16 @@ async def meta_ads_create_adset(params: CreateAdSetInput) -> str:
         - "Crea ad set per link clicks budget €15/giorno targeting donne 25-45"
 
     Note:
-        - Il targeting deve includere almeno geo_locations (paesi, regioni o città)
-        - Budget opzionale se già impostato a livello campagna
+        - Il targeting deve includere OBBLIGATORIAMENTE:
+          * geo_locations (paesi, regioni o città)
+          * targeting_automation.advantage_audience (0=disabilitato, 1=abilitato)
+        - bid_amount è OBBLIGATORIO per optimization goals come LINK_CLICKS, LANDING_PAGE_VIEWS, ecc.
+        - Budget: NON specificare daily_budget/lifetime_budget se la campagna ha già un budget
         - Non specificare sia daily_budget che lifetime_budget contemporaneamente
         - L'ad set viene creato in PAUSED per sicurezza
         - Dopo la creazione, dovrai creare almeno un annuncio nell'ad set
     """
     try:
-        # Prima recupera l'account_id dalla campagna
-        campaign_data = await _make_api_request(
-            params.campaign_id,
-            params={"fields": "account_id"}
-        )
-        account_id = campaign_data.get('account_id')
-        if not account_id:
-            return f"Errore: Impossibile recuperare account_id dalla campagna {params.campaign_id}"
-
-        # Assicura che l'account_id abbia il prefisso act_
-        if not account_id.startswith('act_'):
-            account_id = f'act_{account_id}'
-
         # Prepara i parametri dell'ad set
         adset_params = {
             "name": params.name,
@@ -1985,6 +1995,15 @@ async def meta_ads_create_adset(params: CreateAdSetInput) -> str:
             adset_params["start_time"] = params.start_time
         if params.end_time:
             adset_params["end_time"] = params.end_time
+
+        # Recupera l'account_id dalla campagna
+        campaign_fields = await _make_api_request(
+            params.campaign_id,
+            params={"fields": "account_id"}
+        )
+        account_id = campaign_fields.get('account_id', '')
+        if not account_id.startswith('act_'):
+            account_id = f'act_{account_id}'
 
         # Crea l'ad set usando l'account_id
         endpoint = f"{account_id}/adsets"
