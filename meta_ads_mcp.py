@@ -62,6 +62,41 @@ class BreakdownType(str, Enum):
     AGE_GENDER = "age,gender"
 
 
+class CampaignObjective(str, Enum):
+    """Obiettivi disponibili per le campagne Meta Ads."""
+    OUTCOME_AWARENESS = "OUTCOME_AWARENESS"  # Notorietà
+    OUTCOME_ENGAGEMENT = "OUTCOME_ENGAGEMENT"  # Interazione
+    OUTCOME_LEADS = "OUTCOME_LEADS"  # Contatti
+    OUTCOME_SALES = "OUTCOME_SALES"  # Vendite
+    OUTCOME_TRAFFIC = "OUTCOME_TRAFFIC"  # Traffico
+    OUTCOME_APP_PROMOTION = "OUTCOME_APP_PROMOTION"  # Promozione app
+
+
+class CampaignStatus(str, Enum):
+    """Stati possibili per una campagna."""
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+
+
+class OptimizationGoal(str, Enum):
+    """Obiettivi di ottimizzazione per gli ad set."""
+    REACH = "REACH"  # Copertura
+    IMPRESSIONS = "IMPRESSIONS"  # Impressioni
+    LINK_CLICKS = "LINK_CLICKS"  # Clic sul link
+    LANDING_PAGE_VIEWS = "LANDING_PAGE_VIEWS"  # Visualizzazioni landing page
+    OFFSITE_CONVERSIONS = "OFFSITE_CONVERSIONS"  # Conversioni
+    QUALITY_LEAD = "QUALITY_LEAD"  # Lead di qualità
+    VALUE = "VALUE"  # Valore
+    THRUPLAY = "THRUPLAY"  # Visualizzazioni video complete
+
+
+class BillingEvent(str, Enum):
+    """Eventi di fatturazione per gli ad set."""
+    IMPRESSIONS = "IMPRESSIONS"  # Impressioni
+    LINK_CLICKS = "LINK_CLICKS"  # Clic sul link
+    THRUPLAY = "THRUPLAY"  # Visualizzazioni video complete
+
+
 # Modelli Pydantic per validazione input
 
 class ListAccountsInput(BaseModel):
@@ -348,6 +383,145 @@ class UpdateAdSetStatusInput(BaseModel):
     )
 
 
+class CreateCampaignInput(BaseModel):
+    """Input per creare una nuova campagna."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    account_id: str = Field(
+        ...,
+        description="ID dell'account pubblicitario (formato: 'act_123456789' o solo '123456789')",
+        min_length=1
+    )
+    name: str = Field(
+        ...,
+        description="Nome della campagna",
+        min_length=1,
+        max_length=400
+    )
+    objective: CampaignObjective = Field(
+        ...,
+        description="Obiettivo della campagna"
+    )
+    status: CampaignStatus = Field(
+        default=CampaignStatus.PAUSED,
+        description="Stato iniziale della campagna (default: PAUSED per sicurezza)"
+    )
+    daily_budget: Optional[int] = Field(
+        default=None,
+        description="Budget giornaliero in centesimi (es. 5000 = €50). Richiesto se non specifichi lifetime_budget",
+        ge=100
+    )
+    lifetime_budget: Optional[int] = Field(
+        default=None,
+        description="Budget totale lifetime in centesimi (es. 10000 = €100). Richiesto se non specifichi daily_budget",
+        ge=100
+    )
+    special_ad_categories: Optional[List[str]] = Field(
+        default=["NONE"],
+        description="Categorie speciali: CREDIT, EMPLOYMENT, HOUSING, ISSUES_ELECTIONS_POLITICS, ONLINE_GAMBLING_AND_GAMING, NONE (default)"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('account_id')
+    @classmethod
+    def validate_account_id(cls, v: str) -> str:
+        """Assicura che l'account ID abbia il prefisso corretto."""
+        if not v.startswith('act_'):
+            return f'act_{v}'
+        return v
+
+    @field_validator('daily_budget')
+    @classmethod
+    def validate_budgets(cls, v: Optional[int], info) -> Optional[int]:
+        """Valida che almeno uno tra daily_budget e lifetime_budget sia specificato."""
+        lifetime_budget = info.data.get('lifetime_budget')
+        if v is None and lifetime_budget is None:
+            raise ValueError("Devi specificare almeno uno tra daily_budget o lifetime_budget")
+        if v is not None and lifetime_budget is not None:
+            raise ValueError("Non puoi specificare sia daily_budget che lifetime_budget contemporaneamente")
+        return v
+
+
+class CreateAdSetInput(BaseModel):
+    """Input per creare un nuovo ad set."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    campaign_id: str = Field(
+        ...,
+        description="ID della campagna a cui associare l'ad set",
+        min_length=1
+    )
+    name: str = Field(
+        ...,
+        description="Nome dell'ad set",
+        min_length=1,
+        max_length=400
+    )
+    optimization_goal: OptimizationGoal = Field(
+        ...,
+        description="Obiettivo di ottimizzazione dell'ad set"
+    )
+    billing_event: BillingEvent = Field(
+        ...,
+        description="Evento di fatturazione"
+    )
+    bid_amount: Optional[int] = Field(
+        default=None,
+        description="Importo bid in centesimi (opzionale, Meta ottimizza automaticamente se non specificato)",
+        ge=1
+    )
+    daily_budget: Optional[int] = Field(
+        default=None,
+        description="Budget giornaliero in centesimi (es. 2000 = €20). Richiesto se campagna non ha budget",
+        ge=100
+    )
+    lifetime_budget: Optional[int] = Field(
+        default=None,
+        description="Budget lifetime in centesimi (es. 5000 = €50). Alternativa a daily_budget",
+        ge=100
+    )
+    targeting: Dict[str, Any] = Field(
+        ...,
+        description="Oggetto targeting con geo_locations (es: {'geo_locations': {'countries': ['IT']}}), age_min, age_max, genders"
+    )
+    start_time: Optional[str] = Field(
+        default=None,
+        description="Data/ora di inizio (formato ISO 8601, es: '2025-01-15T00:00:00+0100'). Se non specificato, inizia subito quando attivato"
+    )
+    end_time: Optional[str] = Field(
+        default=None,
+        description="Data/ora di fine (formato ISO 8601). Opzionale"
+    )
+    status: AdSetStatus = Field(
+        default=AdSetStatus.PAUSED,
+        description="Stato iniziale dell'ad set (default: PAUSED per sicurezza)"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('targeting')
+    @classmethod
+    def validate_targeting(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        """Valida che il targeting abbia almeno geo_locations."""
+        if 'geo_locations' not in v:
+            raise ValueError("Il targeting deve includere almeno 'geo_locations' con paesi, regioni o città")
+        return v
+
+    @field_validator('daily_budget')
+    @classmethod
+    def validate_budgets(cls, v: Optional[int], info) -> Optional[int]:
+        """Valida che non si specifichino sia daily che lifetime budget."""
+        lifetime_budget = info.data.get('lifetime_budget')
+        if v is not None and lifetime_budget is not None:
+            raise ValueError("Non puoi specificare sia daily_budget che lifetime_budget contemporaneamente")
+        return v
+
+
 # Funzioni di utilità condivise
 
 def _get_access_token() -> str:
@@ -376,13 +550,26 @@ async def _make_api_request(
     params["access_token"] = access_token
 
     async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method,
-            f"{API_BASE_URL}/{endpoint}",
-            params=params,
-            timeout=DEFAULT_TIMEOUT,
-            **kwargs
-        )
+        url = f"{API_BASE_URL}/{endpoint}"
+
+        # AdSet creation richiede form-data invece di query string
+        if method.upper() == "POST" and endpoint.endswith('/adsets'):
+            response = await client.post(
+                url,
+                data=params,
+                timeout=DEFAULT_TIMEOUT,
+                **kwargs
+            )
+        else:
+            # Per tutto il resto (incluso campaign creation), usa query string
+            response = await client.request(
+                method,
+                url,
+                params=params,
+                timeout=DEFAULT_TIMEOUT,
+                **kwargs
+            )
+
         response.raise_for_status()
         return response.json()
 
@@ -1582,6 +1769,313 @@ async def meta_ads_update_adset_status(params: UpdateAdSetStatusInput) -> str:
                 "changed": True
             }
             return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_create_campaign",
+    annotations={
+        "title": "Crea Nuova Campagna",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_create_campaign(params: CreateCampaignInput) -> str:
+    """
+    Crea una nuova campagna pubblicitaria su Meta Ads.
+
+    Questo tool permette di creare una campagna con nome, obiettivo, budget e stato.
+    La campagna viene creata in stato PAUSED di default per permettere la configurazione
+    degli ad set e annunci prima di attivarla.
+
+    Args:
+        params (CreateCampaignInput): Parametri validati contenenti:
+            - account_id (str): ID account (formato 'act_123456789')
+            - name (str): Nome della campagna (1-400 caratteri)
+            - objective (CampaignObjective): Obiettivo (OUTCOME_AWARENESS, OUTCOME_ENGAGEMENT,
+              OUTCOME_LEADS, OUTCOME_SALES, OUTCOME_TRAFFIC, OUTCOME_APP_PROMOTION)
+            - status (CampaignStatus): Stato iniziale (default: PAUSED)
+            - daily_budget (Optional[int]): Budget giornaliero in centesimi (min €1 = 100)
+            - lifetime_budget (Optional[int]): Budget totale in centesimi (alternativa a daily_budget)
+            - special_ad_categories (Optional[List[str]]): Per categorie speciali (credito, lavoro, casa, politica)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: ID della campagna creata con conferma e dettagli
+
+    Esempi d'uso:
+        - "Crea campagna 'Promo Estate 2025' per vendite con budget €50/giorno"
+        - "Nuova campagna awareness 'Brand Launch' con budget lifetime €500"
+        - "Crea campagna lead generation con budget €30/giorno"
+
+    Note:
+        - Devi specificare SOLO uno tra daily_budget o lifetime_budget
+        - La campagna viene creata in PAUSED per sicurezza
+        - Dopo la creazione, dovrai creare almeno un ad set e un annuncio
+        - Per categorie speciali (credito, lavoro, casa, politica) devi specificare special_ad_categories
+    """
+    try:
+        # Prepara i parametri della campagna
+        campaign_params = {
+            "name": params.name,
+            "objective": params.objective.value,
+            "status": params.status.value
+        }
+
+        # Aggiungi budget (solo uno dei due)
+        if params.daily_budget is not None:
+            campaign_params["daily_budget"] = params.daily_budget
+        elif params.lifetime_budget is not None:
+            campaign_params["lifetime_budget"] = params.lifetime_budget
+
+        # Aggiungi categorie speciali se presenti
+        if params.special_ad_categories:
+            campaign_params["special_ad_categories"] = json.dumps(params.special_ad_categories)
+
+        # Crea la campagna
+        endpoint = f"{params.account_id}/campaigns"
+        result = await _make_api_request(
+            endpoint,
+            method="POST",
+            params=campaign_params
+        )
+
+        campaign_id = result.get('id')
+        if not campaign_id:
+            return "Errore: Campagna non creata. Verifica i parametri."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Campagna Creata con Successo\n"]
+            lines.append(f"**Nome**: {params.name}")
+            lines.append(f"**ID**: {campaign_id}")
+            lines.append(f"**Account**: {params.account_id}\n")
+
+            lines.append("## Configurazione\n")
+            lines.append(f"- **Obiettivo**: {params.objective.value}")
+            lines.append(f"- **Stato**: {params.status.value}")
+
+            if params.daily_budget:
+                lines.append(f"- **Budget Giornaliero**: €{params.daily_budget/100:.2f}")
+            elif params.lifetime_budget:
+                lines.append(f"- **Budget Lifetime**: €{params.lifetime_budget/100:.2f}")
+
+            if params.special_ad_categories:
+                lines.append(f"- **Categorie Speciali**: {', '.join(params.special_ad_categories)}")
+
+            lines.append("\n## Prossimi Passi\n")
+            lines.append("1. ✅ Campagna creata")
+            lines.append(f"2. ⏭️ Crea ad set con `meta_ads_create_adset` usando campaign_id: {campaign_id}")
+            lines.append("3. ⏭️ Crea annunci nell'ad set")
+            lines.append(f"4. ⏭️ Attiva la campagna con `meta_ads_update_campaign_status` quando pronto")
+
+            if params.status == CampaignStatus.PAUSED:
+                lines.append("\n⏸️ *La campagna è in stato PAUSED. Configurala completamente prima di attivarla.*")
+
+            return "\n".join(lines)
+
+        else:
+            result_data = {
+                "success": True,
+                "campaign_id": campaign_id,
+                "campaign_name": params.name,
+                "account_id": params.account_id,
+                "objective": params.objective.value,
+                "status": params.status.value
+            }
+            if params.daily_budget:
+                result_data["daily_budget"] = params.daily_budget
+            if params.lifetime_budget:
+                result_data["lifetime_budget"] = params.lifetime_budget
+            return json.dumps(result_data, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_create_adset",
+    annotations={
+        "title": "Crea Nuovo Ad Set",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_create_adset(params: CreateAdSetInput) -> str:
+    """
+    Crea un nuovo ad set all'interno di una campagna esistente.
+
+    Questo tool permette di creare un ad set con targeting, budget, ottimizzazione
+    e scheduling. L'ad set viene creato in stato PAUSED di default per permettere
+    la configurazione degli annunci prima di attivarlo.
+
+    Args:
+        params (CreateAdSetInput): Parametri validati contenenti:
+            - campaign_id (str): ID campagna a cui associare l'ad set
+            - name (str): Nome dell'ad set (1-400 caratteri)
+            - optimization_goal (OptimizationGoal): Obiettivo ottimizzazione (REACH, IMPRESSIONS,
+              LINK_CLICKS, LANDING_PAGE_VIEWS, OFFSITE_CONVERSIONS, QUALITY_LEAD, VALUE, THRUPLAY)
+            - billing_event (BillingEvent): Evento fatturazione (IMPRESSIONS, LINK_CLICKS, THRUPLAY)
+            - targeting (Dict): Oggetto targeting con almeno geo_locations. Esempio:
+              {'geo_locations': {'countries': ['IT']}, 'age_min': 25, 'age_max': 55, 'genders': [1, 2]}
+            - bid_amount (Optional[int]): Importo bid in centesimi (opzionale, Meta ottimizza se non specificato)
+            - daily_budget (Optional[int]): Budget giornaliero in centesimi (se campagna senza budget)
+            - lifetime_budget (Optional[int]): Budget lifetime in centesimi (alternativa a daily_budget)
+            - start_time (Optional[str]): Data/ora inizio (ISO 8601, es: '2025-01-15T00:00:00+0100')
+            - end_time (Optional[str]): Data/ora fine (ISO 8601, opzionale)
+            - status (AdSetStatus): Stato iniziale (default: PAUSED)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: ID dell'ad set creato con conferma e dettagli
+
+    Esempi d'uso:
+        - "Crea ad set 'Italia 25-55' per campagna 123456 targeting Italia con budget €20/giorno"
+        - "Nuovo ad set ottimizzato per conversioni con targeting uomini 30-50 Roma"
+        - "Crea ad set per link clicks budget €15/giorno targeting donne 25-45"
+
+    Note:
+        - Il targeting deve includere almeno geo_locations (paesi, regioni o città)
+        - Budget opzionale se già impostato a livello campagna
+        - Non specificare sia daily_budget che lifetime_budget contemporaneamente
+        - L'ad set viene creato in PAUSED per sicurezza
+        - Dopo la creazione, dovrai creare almeno un annuncio nell'ad set
+    """
+    try:
+        # Prima recupera l'account_id dalla campagna
+        campaign_data = await _make_api_request(
+            params.campaign_id,
+            params={"fields": "account_id"}
+        )
+        account_id = campaign_data.get('account_id')
+        if not account_id:
+            return f"Errore: Impossibile recuperare account_id dalla campagna {params.campaign_id}"
+
+        # Assicura che l'account_id abbia il prefisso act_
+        if not account_id.startswith('act_'):
+            account_id = f'act_{account_id}'
+
+        # Prepara i parametri dell'ad set
+        adset_params = {
+            "name": params.name,
+            "campaign_id": params.campaign_id,
+            "optimization_goal": params.optimization_goal.value,
+            "billing_event": params.billing_event.value,
+            "targeting": json.dumps(params.targeting),
+            "status": params.status.value
+        }
+
+        # Aggiungi bid amount se specificato
+        if params.bid_amount is not None:
+            adset_params["bid_amount"] = params.bid_amount
+
+        # Aggiungi budget se specificato (opzionale se già impostato a livello campagna)
+        if params.daily_budget is not None:
+            adset_params["daily_budget"] = params.daily_budget
+        elif params.lifetime_budget is not None:
+            adset_params["lifetime_budget"] = params.lifetime_budget
+
+        # Aggiungi scheduling se specificato
+        if params.start_time:
+            adset_params["start_time"] = params.start_time
+        if params.end_time:
+            adset_params["end_time"] = params.end_time
+
+        # Crea l'ad set usando l'account_id
+        endpoint = f"{account_id}/adsets"
+        result = await _make_api_request(
+            endpoint,
+            method="POST",
+            params=adset_params
+        )
+
+        adset_id = result.get('id')
+        if not adset_id:
+            return "Errore: Ad set non creato. Verifica i parametri."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Ad Set Creato con Successo\n"]
+            lines.append(f"**Nome**: {params.name}")
+            lines.append(f"**ID**: {adset_id}")
+            lines.append(f"**Campagna**: {params.campaign_id}\n")
+
+            lines.append("## Configurazione\n")
+            lines.append(f"- **Obiettivo Ottimizzazione**: {params.optimization_goal.value}")
+            lines.append(f"- **Evento Fatturazione**: {params.billing_event.value}")
+            lines.append(f"- **Stato**: {params.status.value}")
+
+            if params.bid_amount:
+                lines.append(f"- **Bid Amount**: €{params.bid_amount/100:.2f}")
+
+            if params.daily_budget:
+                lines.append(f"- **Budget Giornaliero**: €{params.daily_budget/100:.2f}")
+            elif params.lifetime_budget:
+                lines.append(f"- **Budget Lifetime**: €{params.lifetime_budget/100:.2f}")
+
+            lines.append("\n## Targeting\n")
+            targeting = params.targeting
+
+            # Geo targeting
+            geo = targeting.get('geo_locations', {})
+            if 'countries' in geo:
+                lines.append(f"- **Paesi**: {', '.join(geo['countries'])}")
+            if 'regions' in geo:
+                lines.append(f"- **Regioni**: {len(geo['regions'])} regioni")
+            if 'cities' in geo:
+                lines.append(f"- **Città**: {len(geo['cities'])} città")
+
+            # Demographic targeting
+            if 'age_min' in targeting or 'age_max' in targeting:
+                age_min = targeting.get('age_min', 18)
+                age_max = targeting.get('age_max', 65)
+                lines.append(f"- **Età**: {age_min}-{age_max} anni")
+
+            if 'genders' in targeting:
+                gender_map = {1: 'Uomini', 2: 'Donne'}
+                genders_str = ', '.join([gender_map.get(g, str(g)) for g in targeting['genders']])
+                lines.append(f"- **Genere**: {genders_str}")
+
+            # Scheduling
+            if params.start_time or params.end_time:
+                lines.append("\n## Scheduling\n")
+                if params.start_time:
+                    lines.append(f"- **Inizio**: {params.start_time}")
+                if params.end_time:
+                    lines.append(f"- **Fine**: {params.end_time}")
+
+            lines.append("\n## Prossimi Passi\n")
+            lines.append("1. ✅ Ad set creato")
+            lines.append(f"2. ⏭️ Crea annunci nell'ad set {adset_id}")
+            lines.append("3. ⏭️ Attiva l'ad set con `meta_ads_update_adset_status` quando pronto")
+
+            if params.status == AdSetStatus.PAUSED:
+                lines.append("\n⏸️ *L'ad set è in stato PAUSED. Crea gli annunci prima di attivarlo.*")
+
+            return "\n".join(lines)
+
+        else:
+            result_data = {
+                "success": True,
+                "adset_id": adset_id,
+                "adset_name": params.name,
+                "campaign_id": params.campaign_id,
+                "optimization_goal": params.optimization_goal.value,
+                "billing_event": params.billing_event.value,
+                "status": params.status.value,
+                "targeting": params.targeting
+            }
+            if params.bid_amount:
+                result_data["bid_amount"] = params.bid_amount
+            if params.daily_budget:
+                result_data["daily_budget"] = params.daily_budget
+            if params.lifetime_budget:
+                result_data["lifetime_budget"] = params.lifetime_budget
+            return json.dumps(result_data, indent=2)
 
     except Exception as e:
         return _handle_api_error(e)
