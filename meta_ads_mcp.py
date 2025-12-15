@@ -294,6 +294,12 @@ class AdSetStatus(str, Enum):
     PAUSED = "PAUSED"
 
 
+class AdStatus(str, Enum):
+    """Stati possibili per un annuncio."""
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+
+
 class UpdateAdSetTargetingInput(BaseModel):
     """Input per aggiornare il targeting di un ad set."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
@@ -374,6 +380,25 @@ class UpdateAdSetStatusInput(BaseModel):
         min_length=1
     )
     status: AdSetStatus = Field(
+        ...,
+        description="Nuovo stato: ACTIVE o PAUSED"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+
+class UpdateAdStatusInput(BaseModel):
+    """Input per cambiare lo stato di un annuncio."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    ad_id: str = Field(
+        ...,
+        description="ID dell'annuncio da modificare",
+        min_length=1
+    )
+    status: AdStatus = Field(
         ...,
         description="Nuovo stato: ACTIVE o PAUSED"
     )
@@ -1137,8 +1162,8 @@ async def meta_ads_get_insights(params: GetInsightsInput) -> str:
                 else:
                     lines.append(f"## Metriche Totali")
 
-                lines.append(f"- **Impressions**: {insight.get('impressions', '0'):,}")
-                lines.append(f"- **Clicks**: {insight.get('clicks', '0'):,}")
+                lines.append(f"- **Impressions**: {int(insight.get('impressions', '0')):,}")
+                lines.append(f"- **Clicks**: {int(insight.get('clicks', '0')):,}")
                 lines.append(f"- **Spend**: {_format_currency(insight.get('spend', '0'))}")
                 lines.append(f"- **CPM**: {_format_currency(insight.get('cpm', '0'))}")
                 lines.append(f"- **CPC**: {_format_currency(insight.get('cpc', '0'))}")
@@ -1146,7 +1171,7 @@ async def meta_ads_get_insights(params: GetInsightsInput) -> str:
                 ctr = insight.get('ctr', 0)
                 lines.append(f"- **CTR**: {_format_percentage(float(ctr))}")
 
-                lines.append(f"- **Reach**: {insight.get('reach', '0'):,}")
+                lines.append(f"- **Reach**: {int(insight.get('reach', '0')):,}")
                 lines.append(f"- **Frequency**: {insight.get('frequency', '0')}")
 
                 # Conversioni
@@ -1414,8 +1439,8 @@ async def meta_ads_generate_report(params: GenerateReportInput) -> str:
                 segment_title = " | ".join(segment_parts) if segment_parts else f"Segmento {idx}"
                 lines.append(f"## {idx}. {segment_title}")
 
-                lines.append(f"- **Impressions**: {insight.get('impressions', '0'):,}")
-                lines.append(f"- **Clicks**: {insight.get('clicks', '0'):,}")
+                lines.append(f"- **Impressions**: {int(insight.get('impressions', '0')):,}")
+                lines.append(f"- **Clicks**: {int(insight.get('clicks', '0')):,}")
                 lines.append(f"- **Spend**: {_format_currency(insight.get('spend', '0'))}")
 
                 ctr = float(insight.get('ctr', 0))
@@ -1423,7 +1448,7 @@ async def meta_ads_generate_report(params: GenerateReportInput) -> str:
                 lines.append(f"- **CPC**: {_format_currency(insight.get('cpc', '0'))}")
 
                 if 'reach' in insight:
-                    lines.append(f"- **Reach**: {insight['reach']:,}")
+                    lines.append(f"- **Reach**: {int(insight['reach']):,}")
 
                 if 'actions' in insight:
                     total_actions = sum(int(a.get('value', 0)) for a in insight['actions'])
@@ -1784,6 +1809,115 @@ async def meta_ads_update_adset_status(params: UpdateAdSetStatusInput) -> str:
                 "success": True,
                 "adset_id": params.adset_id,
                 "adset_name": adset_name,
+                "old_status": old_status,
+                "new_status": params.status.value,
+                "changed": True
+            }
+            return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_update_ad_status",
+    annotations={
+        "title": "Cambia Stato Annuncio",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_update_ad_status(params: UpdateAdStatusInput) -> str:
+    """
+    Attiva o mette in pausa un singolo annuncio.
+
+    Questo tool permette di cambiare lo stato di un annuncio tra
+    ACTIVE (attivo, può essere mostrato) e PAUSED (in pausa, non viene mostrato).
+
+    Args:
+        params (UpdateAdStatusInput): Parametri validati contenenti:
+            - ad_id (str): ID dell'annuncio da modificare
+            - status (AdStatus): Nuovo stato (ACTIVE o PAUSED)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Conferma del cambio di stato
+
+    Esempi d'uso:
+        - "Attiva annuncio 123456789" (status=ACTIVE)
+        - "Metti in pausa annuncio 987654321" (status=PAUSED)
+        - "Pausa l'ad con performance peggiore"
+
+    Note:
+        - Il cambio stato ha effetto immediato
+        - Annunci PAUSED non consumano budget e non vengono mostrati
+        - Annunci ACTIVE vengono mostrati se l'ad set e la campagna sono attivi
+        - L'ad set e la campagna devono essere ACTIVE perché l'annuncio sia erogato
+    """
+    try:
+        # Prima recupera i dati attuali dell'annuncio
+        current_data = await _make_api_request(
+            params.ad_id,
+            params={"fields": "name,status,creative{name}"}
+        )
+
+        ad_name = current_data.get('name', params.ad_id)
+        old_status = current_data.get('status', 'UNKNOWN')
+        creative_name = current_data.get('creative', {}).get('name', 'N/A')
+
+        # Se lo stato è già quello richiesto, comunica che non serve modificare
+        if old_status == params.status.value:
+            if params.response_format == ResponseFormat.MARKDOWN:
+                return f"# ℹ️ Nessuna Modifica Necessaria\n\nL'annuncio **{ad_name}** è già nello stato **{params.status.value}**."
+            else:
+                result = {
+                    "success": True,
+                    "ad_id": params.ad_id,
+                    "ad_name": ad_name,
+                    "status": params.status.value,
+                    "changed": False,
+                    "message": "Annuncio già nello stato richiesto"
+                }
+                return json.dumps(result, indent=2)
+
+        # Esegui l'aggiornamento
+        update_data = await _make_api_request(
+            params.ad_id,
+            method="POST",
+            params={
+                "status": params.status.value
+            }
+        )
+
+        if not update_data.get('success'):
+            return f"Errore nel cambio stato per annuncio {params.ad_id}"
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Stato Annuncio Modificato\n"]
+            lines.append(f"**Annuncio**: {ad_name}")
+            lines.append(f"**ID**: {params.ad_id}")
+            lines.append(f"**Creative**: {creative_name}\n")
+
+            lines.append("## Cambio Stato\n")
+            lines.append(f"- **Stato Precedente**: {old_status}")
+            lines.append(f"- **Nuovo Stato**: {params.status.value}")
+
+            if params.status == AdStatus.ACTIVE:
+                lines.append("\n✅ **L'annuncio è ora ATTIVO** e può essere mostrato.")
+                lines.append("Nota: l'annuncio verrà effettivamente erogato solo se anche l'ad set e la campagna sono attivi.")
+            else:
+                lines.append("\n⏸️ **L'annuncio è ora IN PAUSA** e non verrà mostrato.")
+                lines.append("Gli altri annunci nell'ad set continueranno a essere erogati normalmente.")
+
+            return "\n".join(lines)
+
+        else:
+            result = {
+                "success": True,
+                "ad_id": params.ad_id,
+                "ad_name": ad_name,
                 "old_status": old_status,
                 "new_status": params.status.value,
                 "changed": True
