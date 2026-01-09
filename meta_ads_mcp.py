@@ -11,11 +11,13 @@ import json
 from typing import Optional, List, Dict, Any
 from enum import Enum
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 from pathlib import Path
+from toon import encode as toon_encode, EncodeOptions
 
 # Carica variabili d'ambiente dal file .env
 env_path = Path(__file__).parent / '.env'
@@ -34,6 +36,7 @@ class ResponseFormat(str, Enum):
     """Formato di output per le risposte dei tool."""
     MARKDOWN = "markdown"
     JSON = "json"
+    TOON = "toon"  # Token-optimized format (30-50% token savings)
 
 
 class DatePreset(str, Enum):
@@ -671,6 +674,26 @@ def _check_truncation(content: str, data_count: int) -> str:
     return content
 
 
+def _format_as_toon(data: dict) -> str:
+    """
+    Formatta i dati in formato TOON (Token-Oriented Object Notation).
+
+    TOON riduce i token del 30-50% rispetto a JSON, ottimale per dati tabellari.
+    Usa indent=2 per leggibilità.
+
+    Args:
+        data: Dizionario da convertire in TOON
+
+    Returns:
+        Stringa in formato TOON
+    """
+    try:
+        return toon_encode(data, EncodeOptions(indent=2))
+    except Exception as e:
+        # Fallback a JSON se TOON encoding fallisce
+        return json.dumps(data, indent=2, ensure_ascii=False)
+
+
 # Implementazione tool
 
 @mcp.tool(
@@ -770,6 +793,13 @@ async def meta_ads_list_accounts(params: ListAccountsInput) -> str:
             content = "\n".join(lines)
             return _check_truncation(content, len(accounts))
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "total": len(accounts),
+                "count": len(accounts),
+                "accounts": accounts
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "total": len(accounts),
@@ -865,6 +895,14 @@ async def meta_ads_list_campaigns(params: ListCampaignsInput) -> str:
             content = "\n".join(lines)
             return _check_truncation(content, len(campaigns))
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "account_id": params.account_id,
+                "total": len(campaigns),
+                "count": len(campaigns),
+                "campaigns": campaigns
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "account_id": params.account_id,
@@ -960,6 +998,14 @@ async def meta_ads_list_adsets(params: ListAdSetsInput) -> str:
             content = "\n".join(lines)
             return _check_truncation(content, len(adsets))
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "campaign_id": params.campaign_id,
+                "total": len(adsets),
+                "count": len(adsets),
+                "adsets": adsets
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "campaign_id": params.campaign_id,
@@ -1046,6 +1092,14 @@ async def meta_ads_list_ads(params: ListAdsInput) -> str:
             content = "\n".join(lines)
             return _check_truncation(content, len(ads))
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "adset_id": params.adset_id,
+                "total": len(ads),
+                "count": len(ads),
+                "ads": ads
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "adset_id": params.adset_id,
@@ -1187,6 +1241,15 @@ async def meta_ads_get_insights(params: GetInsightsInput) -> str:
             content = "\n".join(lines)
             return _check_truncation(content, len(insights))
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "object_id": params.object_id,
+                "level": params.level,
+                "period": date_info,
+                "total": len(insights),
+                "insights": insights
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "object_id": params.object_id,
@@ -1308,6 +1371,12 @@ async def meta_ads_get_creative(params: GetCreativeInput) -> str:
             content = "\n".join(lines)
             return content
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "ad_id": params.ad_id,
+                "creative": creative
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "ad_id": params.ad_id,
@@ -1463,6 +1532,15 @@ async def meta_ads_generate_report(params: GenerateReportInput) -> str:
             content = "\n".join(lines)
             return _check_truncation(content, len(insights))
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "object_id": params.object_id,
+                "breakdowns": breakdown_str,
+                "period": date_info,
+                "total_segments": len(insights),
+                "insights": insights
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "object_id": params.object_id,
@@ -1598,6 +1676,14 @@ async def meta_ads_update_adset_targeting(params: UpdateAdSetTargetingInput) -> 
 
             return "\n".join(lines)
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "success": True,
+                "adset_id": params.adset_id,
+                "adset_name": adset_name,
+                "updated_targeting": updated_targeting
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "success": True,
@@ -1695,6 +1781,16 @@ async def meta_ads_update_adset_budget(params: UpdateAdSetBudgetInput) -> str:
 
             return "\n".join(lines)
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "success": True,
+                "adset_id": params.adset_id,
+                "adset_name": adset_name,
+                "old_budget_cents": old_budget,
+                "new_budget_cents": params.daily_budget,
+                "difference_cents": params.daily_budget - old_budget
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "success": True,
@@ -1762,6 +1858,16 @@ async def meta_ads_update_adset_status(params: UpdateAdSetStatusInput) -> str:
         if old_status == params.status.value:
             if params.response_format == ResponseFormat.MARKDOWN:
                 return f"# ℹ️ Nessuna Modifica Necessaria\n\nL'ad set **{adset_name}** è già nello stato **{params.status.value}**."
+            elif params.response_format == ResponseFormat.TOON:
+                result = {
+                    "success": True,
+                    "adset_id": params.adset_id,
+                    "adset_name": adset_name,
+                    "status": params.status.value,
+                    "changed": False,
+                    "message": "Ad set già nello stato richiesto"
+                }
+                return _format_as_toon(result)
             else:
                 result = {
                     "success": True,
@@ -1804,6 +1910,16 @@ async def meta_ads_update_adset_status(params: UpdateAdSetStatusInput) -> str:
 
             return "\n".join(lines)
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "success": True,
+                "adset_id": params.adset_id,
+                "adset_name": adset_name,
+                "old_status": old_status,
+                "new_status": params.status.value,
+                "changed": True
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "success": True,
@@ -1871,6 +1987,16 @@ async def meta_ads_update_ad_status(params: UpdateAdStatusInput) -> str:
         if old_status == params.status.value:
             if params.response_format == ResponseFormat.MARKDOWN:
                 return f"# ℹ️ Nessuna Modifica Necessaria\n\nL'annuncio **{ad_name}** è già nello stato **{params.status.value}**."
+            elif params.response_format == ResponseFormat.TOON:
+                result = {
+                    "success": True,
+                    "ad_id": params.ad_id,
+                    "ad_name": ad_name,
+                    "status": params.status.value,
+                    "changed": False,
+                    "message": "Annuncio già nello stato richiesto"
+                }
+                return _format_as_toon(result)
             else:
                 result = {
                     "success": True,
@@ -1913,6 +2039,16 @@ async def meta_ads_update_ad_status(params: UpdateAdStatusInput) -> str:
 
             return "\n".join(lines)
 
+        elif params.response_format == ResponseFormat.TOON:
+            result = {
+                "success": True,
+                "ad_id": params.ad_id,
+                "ad_name": ad_name,
+                "old_status": old_status,
+                "new_status": params.status.value,
+                "changed": True
+            }
+            return _format_as_toon(result)
         else:
             result = {
                 "success": True,
@@ -2229,6 +2365,748 @@ async def meta_ads_create_adset(params: CreateAdSetInput) -> str:
             if params.lifetime_budget:
                 result_data["lifetime_budget"] = params.lifetime_budget
             return json.dumps(result_data, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+# =============================================================================
+# MULTI-LANGUAGE ADS - Modelli e Tool per annunci multilingua
+# =============================================================================
+
+class SearchLocalesInput(BaseModel):
+    """Input per cercare locale IDs per Multi-Language Ads."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    query: str = Field(
+        ...,
+        description="Nome della lingua da cercare (es. 'italian', 'french', 'german')",
+        min_length=1
+    )
+    limit: Optional[int] = Field(
+        default=20,
+        description="Numero massimo di risultati (1-100)",
+        ge=1,
+        le=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+
+class LanguageAsset(BaseModel):
+    """Definisce i testi per una singola lingua in un Multi-Language Ad."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    label: str = Field(
+        ...,
+        description="Etichetta identificativa della lingua in formato ISO (es. 'en_XX', 'it_IT', 'de_DE', 'fr_XX', 'pl_PL'). Codici comuni: en_XX (inglese), it_IT (italiano), de_DE (tedesco), fr_XX (francese), es_XX (spagnolo), pl_PL (polacco), pt_PT (portoghese)",
+        min_length=2,
+        max_length=10
+    )
+    locale_ids: List[int] = Field(
+        ...,
+        description="Lista di locale IDs per questa lingua (es. [6, 24] per inglese US+UK, [28] per italiano). Usa meta_ads_search_locales per trovarli",
+        min_length=1
+    )
+    body: str = Field(
+        ...,
+        description="Testo principale dell'annuncio (max 4096 caratteri)",
+        min_length=1,
+        max_length=4096
+    )
+    title: str = Field(
+        ...,
+        description="Titolo dell'annuncio (max 255 caratteri)",
+        min_length=1,
+        max_length=255
+    )
+    description: str = Field(
+        default="",
+        description="Descrizione secondaria (max 10000 caratteri). Può essere vuoto ''",
+        max_length=10000
+    )
+    link_url: str = Field(
+        ...,
+        description="URL di destinazione per questa lingua",
+        min_length=1
+    )
+    display_url: Optional[str] = Field(
+        default=None,
+        description="URL visualizzato nell'annuncio (opzionale, es. 'example.com'). Se non specificato, viene estratto da link_url"
+    )
+    is_default: bool = Field(
+        default=False,
+        description="Se True, questa lingua sarà quella di default per utenti con locale non corrispondente"
+    )
+
+
+class CallToActionType(str, Enum):
+    """Tipi di Call to Action disponibili."""
+    SHOP_NOW = "SHOP_NOW"
+    LEARN_MORE = "LEARN_MORE"
+    SIGN_UP = "SIGN_UP"
+    SUBSCRIBE = "SUBSCRIBE"
+    CONTACT_US = "CONTACT_US"
+    GET_QUOTE = "GET_QUOTE"
+    APPLY_NOW = "APPLY_NOW"
+    BOOK_NOW = "BOOK_NOW"
+    DOWNLOAD = "DOWNLOAD"
+    GET_OFFER = "GET_OFFER"
+    GET_DIRECTIONS = "GET_DIRECTIONS"
+    SEND_MESSAGE = "SEND_MESSAGE"
+    WATCH_MORE = "WATCH_MORE"
+    ORDER_NOW = "ORDER_NOW"
+    BUY_NOW = "BUY_NOW"
+
+
+class AdFormat(str, Enum):
+    """Formati annuncio supportati per Multi-Language Ads."""
+    SINGLE_IMAGE = "SINGLE_IMAGE"
+    SINGLE_VIDEO = "SINGLE_VIDEO"
+
+
+class CreateMultiLangAdInput(BaseModel):
+    """Input per creare un annuncio Multi-Language."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    account_id: str = Field(
+        ...,
+        description="ID dell'account pubblicitario (formato: 'act_123456789' o solo '123456789')",
+        min_length=1
+    )
+    adset_id: str = Field(
+        ...,
+        description="ID dell'ad set in cui creare l'annuncio",
+        min_length=1
+    )
+    name: str = Field(
+        ...,
+        description="Nome dell'annuncio",
+        min_length=1,
+        max_length=400
+    )
+    page_id: str = Field(
+        ...,
+        description="ID della pagina Facebook associata",
+        min_length=1
+    )
+    instagram_user_id: Optional[str] = Field(
+        default=None,
+        description="ID dell'account Instagram (opzionale, per placement Instagram). Deve essere l'instagram_user_id, non instagram_actor_id"
+    )
+    ad_format: AdFormat = Field(
+        default=AdFormat.SINGLE_IMAGE,
+        description="Formato annuncio: SINGLE_IMAGE o SINGLE_VIDEO"
+    )
+    image_hash: Optional[str] = Field(
+        default=None,
+        description="Hash dell'immagine (richiesto per SINGLE_IMAGE). Ottienilo dalla libreria immagini dell'account"
+    )
+    video_id: Optional[str] = Field(
+        default=None,
+        description="ID del video (richiesto per SINGLE_VIDEO). Ottienilo dalla libreria video dell'account"
+    )
+    languages: List[LanguageAsset] = Field(
+        ...,
+        description="Lista delle lingue con i relativi testi. Deve contenere esattamente una lingua con is_default=True",
+        min_length=1
+    )
+    call_to_action: CallToActionType = Field(
+        default=CallToActionType.LEARN_MORE,
+        description="Tipo di Call to Action"
+    )
+    status: AdStatus = Field(
+        default=AdStatus.PAUSED,
+        description="Stato iniziale dell'annuncio (default: PAUSED)"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('account_id')
+    @classmethod
+    def validate_account_id(cls, v: str) -> str:
+        """Assicura che l'account ID abbia il prefisso corretto."""
+        if not v.startswith('act_'):
+            return f'act_{v}'
+        return v
+
+    @field_validator('languages')
+    @classmethod
+    def validate_languages(cls, v: List[LanguageAsset]) -> List[LanguageAsset]:
+        """Valida che ci sia esattamente una lingua default."""
+        defaults = [lang for lang in v if lang.is_default]
+        if len(defaults) == 0:
+            raise ValueError("Devi specificare esattamente una lingua con is_default=True")
+        if len(defaults) > 1:
+            raise ValueError("Solo una lingua può avere is_default=True")
+        return v
+
+    @field_validator('image_hash')
+    @classmethod
+    def validate_media(cls, v: Optional[str], info) -> Optional[str]:
+        """Valida che sia presente il media corretto per il formato scelto."""
+        ad_format = info.data.get('ad_format')
+        video_id = info.data.get('video_id')
+
+        if ad_format == AdFormat.SINGLE_IMAGE and not v:
+            raise ValueError("image_hash è richiesto per il formato SINGLE_IMAGE")
+        if ad_format == AdFormat.SINGLE_VIDEO and not video_id:
+            raise ValueError("video_id è richiesto per il formato SINGLE_VIDEO")
+        return v
+
+
+class UpdateAdLanguagesInput(BaseModel):
+    """Input per aggiornare le lingue di un annuncio esistente."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    ad_id: str = Field(
+        ...,
+        description="ID dell'annuncio da modificare",
+        min_length=1
+    )
+    languages: List[LanguageAsset] = Field(
+        ...,
+        description="Nuova lista completa delle lingue. Sostituirà completamente quella esistente",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Formato output"
+    )
+
+    @field_validator('languages')
+    @classmethod
+    def validate_languages(cls, v: List[LanguageAsset]) -> List[LanguageAsset]:
+        """Valida che ci sia esattamente una lingua default."""
+        defaults = [lang for lang in v if lang.is_default]
+        if len(defaults) == 0:
+            raise ValueError("Devi specificare esattamente una lingua con is_default=True")
+        if len(defaults) > 1:
+            raise ValueError("Solo una lingua può avere is_default=True")
+        return v
+
+
+@mcp.tool(
+    name="meta_ads_search_locales",
+    annotations={
+        "title": "Cerca Locale IDs per Multi-Language Ads",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_search_locales(params: SearchLocalesInput) -> str:
+    """
+    Cerca i locale IDs supportati per gli annunci Multi-Language.
+
+    I locale IDs sono necessari per configurare le regole di personalizzazione
+    degli annunci multilingua. Ogni lingua ha uno o più locale IDs associati.
+
+    Args:
+        params (SearchLocalesInput): Parametri validati contenenti:
+            - query (str): Nome della lingua da cercare (es. 'italian', 'french')
+            - limit (int): Numero massimo di risultati (default: 20)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Lista dei locale trovati con ID e nome.
+
+    Esempi d'uso:
+        - "Cerca locale per italiano" → Ritorna locale ID 28 (Italian)
+        - "Cerca locale per english" → Ritorna locale IDs 6 (English US), 24 (English UK)
+        - "Cerca locale per french" → Ritorna locale IDs per francese
+
+    Note:
+        - Usa i locale IDs ritornati nel campo 'locale_ids' di LanguageAsset
+        - Puoi assegnare più locale IDs alla stessa lingua (es. [6, 24] per tutti gli inglesi)
+        - Locale comuni: 6=English US, 24=English UK, 28=Italian, 9=French, 5=German
+    """
+    try:
+        # Chiama l'endpoint di ricerca locales
+        result = await _make_api_request(
+            "search",
+            method="GET",
+            params={
+                "type": "adlocale",
+                "q": params.query,
+                "limit": params.limit
+            }
+        )
+
+        locales = result.get('data', [])
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            if not locales:
+                return f"# Nessun locale trovato per '{params.query}'\n\nProva con un altro termine di ricerca in inglese (es. 'italian', 'french', 'german')."
+
+            lines = [f"# Locale IDs per '{params.query}'\n"]
+            lines.append(f"Trovati **{len(locales)}** locale(s):\n")
+            lines.append("| ID | Nome |")
+            lines.append("|---:|:-----|")
+
+            for locale in locales:
+                lines.append(f"| {locale.get('key')} | {locale.get('name')} |")
+
+            lines.append("\n## Come usare")
+            lines.append("Usa questi IDs nel campo `locale_ids` quando crei un annuncio multilingua:")
+            lines.append("```json")
+            lines.append("{")
+            lines.append(f'  "label": "{params.query}",')
+            lines.append(f'  "locale_ids": [{locales[0].get("key")}],')
+            lines.append('  "body": "Testo annuncio...",')
+            lines.append('  ...')
+            lines.append("}")
+            lines.append("```")
+
+            return "\n".join(lines)
+
+        else:
+            return json.dumps({
+                "query": params.query,
+                "count": len(locales),
+                "locales": [{"id": l.get('key'), "name": l.get('name')} for l in locales]
+            }, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_create_multilang_ad",
+    annotations={
+        "title": "Crea Annuncio Multi-Lingua",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_create_multilang_ad(params: Any) -> str:
+    """
+    Crea un annuncio pubblicitario con supporto per più lingue.
+
+    Gli annunci multilingua permettono di mostrare automaticamente la versione
+    nella lingua corretta in base alle preferenze dell'utente. Facebook ottimizza
+    la delivery per mostrare la lingua più appropriata a ciascun utente.
+
+    Args:
+        params (CreateMultiLangAdInput): Parametri validati contenenti:
+            - account_id (str): ID account (formato 'act_123456789')
+            - adset_id (str): ID dell'ad set di destinazione
+            - name (str): Nome dell'annuncio
+            - page_id (str): ID della pagina Facebook
+            - instagram_user_id (Optional[str]): ID account Instagram (dentro object_story_spec)
+            - ad_format (AdFormat): SINGLE_IMAGE o SINGLE_VIDEO
+            - image_hash (str): Hash immagine (per SINGLE_IMAGE)
+            - video_id (str): ID video (per SINGLE_VIDEO)
+            - languages (List[LanguageAsset]): Lista lingue con testi
+            - call_to_action (CallToActionType): Tipo CTA
+            - status (AdStatus): Stato iniziale (default: PAUSED)
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: ID dell'annuncio creato con conferma e dettagli
+
+    Esempi d'uso:
+        - "Crea annuncio multilingua italiano/inglese per promozione estate"
+        - "Nuovo ad con testi in IT, EN, FR per campagna europea"
+
+    Note:
+        - Usa prima meta_ads_search_locales per trovare i locale IDs
+        - Esattamente una lingua deve avere is_default=True
+        - La lingua default viene mostrata agli utenti con locale non corrispondente
+        - Supporta solo SINGLE_IMAGE e SINGLE_VIDEO (no carousel)
+    """
+    try:
+        # Gestisci il caso in cui params arrivi come stringa JSON
+        if isinstance(params, str):
+            params = CreateMultiLangAdInput(**json.loads(params))
+        elif isinstance(params, dict):
+            params = CreateMultiLangAdInput(**params)
+        elif not isinstance(params, CreateMultiLangAdInput):
+            return f"Errore: tipo di parametro non valido: {type(params)}"
+        # Trova la lingua default per usare la sua label per l'immagine condivisa
+        default_lang = next((lang for lang in params.languages if lang.is_default), params.languages[0])
+        default_label = default_lang.label
+
+        # Costruisci l'asset_feed_spec
+        bodies = []
+        titles = []
+        descriptions = []
+        link_urls = []
+        asset_customization_rules = []
+
+        for lang in params.languages:
+            # Aggiungi gli asset con label
+            bodies.append({
+                "text": lang.body,
+                "adlabels": [{"name": lang.label}]
+            })
+            titles.append({
+                "text": lang.title,
+                "adlabels": [{"name": lang.label}]
+            })
+            descriptions.append({
+                "text": lang.description,
+                "adlabels": [{"name": lang.label}]
+            })
+
+            # Link URL con display_url
+            link_url_entry = {
+                "website_url": lang.link_url,
+                "adlabels": [{"name": lang.label}]
+            }
+            # Aggiungi display_url se specificato, altrimenti estrai dal dominio
+            if lang.display_url:
+                link_url_entry["display_url"] = lang.display_url
+            else:
+                # Estrai dominio dall'URL come display_url
+                parsed = urlparse(lang.link_url)
+                link_url_entry["display_url"] = parsed.netloc or lang.link_url
+            link_urls.append(link_url_entry)
+
+            # Crea la regola di customizzazione per questa lingua
+            rule = {
+                "customization_spec": {
+                    "locales": lang.locale_ids
+                },
+                # image_label punta sempre all'immagine condivisa (label della lingua default)
+                "image_label": {"name": default_label},
+                "body_label": {"name": lang.label},
+                "title_label": {"name": lang.label},
+                "description_label": {"name": lang.label},
+                "link_url_label": {"name": lang.label}
+            }
+
+            if lang.is_default:
+                rule["is_default"] = True
+
+            asset_customization_rules.append(rule)
+
+        # Prepara l'asset_feed_spec con optimization_type: LANGUAGE
+        asset_feed_spec = {
+            "optimization_type": "LANGUAGE",
+            "ad_formats": [params.ad_format.value],
+            "bodies": bodies,
+            "titles": titles,
+            "descriptions": descriptions,
+            "link_urls": link_urls,
+            "call_to_action_types": [params.call_to_action.value],
+            "asset_customization_rules": asset_customization_rules
+        }
+
+        # Aggiungi immagine o video con adlabels della lingua default
+        if params.ad_format == AdFormat.SINGLE_IMAGE:
+            asset_feed_spec["images"] = [{
+                "hash": params.image_hash,
+                "adlabels": [{"name": default_label}]
+            }]
+        else:
+            asset_feed_spec["videos"] = [{
+                "video_id": params.video_id,
+                "adlabels": [{"name": default_label}]
+            }]
+
+        # Prepara object_story_spec
+        object_story_spec = {
+            "page_id": params.page_id
+        }
+        if params.instagram_user_id:
+            object_story_spec["instagram_user_id"] = params.instagram_user_id
+
+        # Crea il creative
+        creative_result = await _make_api_request(
+            f"{params.account_id}/adcreatives",
+            method="POST",
+            params={
+                "object_story_spec": json.dumps(object_story_spec),
+                "asset_feed_spec": json.dumps(asset_feed_spec)
+            }
+        )
+
+        creative_id = creative_result.get('id')
+        if not creative_id:
+            return "Errore: Creative non creato. Verifica i parametri."
+
+        # Crea l'annuncio con il creative
+        ad_result = await _make_api_request(
+            f"{params.account_id}/ads",
+            method="POST",
+            params={
+                "name": params.name,
+                "adset_id": params.adset_id,
+                "creative": json.dumps({"creative_id": creative_id}),
+                "status": params.status.value
+            }
+        )
+
+        ad_id = ad_result.get('id')
+        if not ad_id:
+            return f"Errore: Annuncio non creato (creative_id: {creative_id}). Verifica i parametri."
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Annuncio Multi-Lingua Creato\n"]
+            lines.append(f"**Nome**: {params.name}")
+            lines.append(f"**ID Annuncio**: {ad_id}")
+            lines.append(f"**ID Creative**: {creative_id}")
+            lines.append(f"**Ad Set**: {params.adset_id}")
+            lines.append(f"**Stato**: {params.status.value}\n")
+
+            lines.append("## Lingue Configurate\n")
+            for lang in params.languages:
+                default_marker = " ⭐ (default)" if lang.is_default else ""
+                lines.append(f"### {lang.label.capitalize()}{default_marker}")
+                lines.append(f"- **Locale IDs**: {lang.locale_ids}")
+                lines.append(f"- **Titolo**: {lang.title[:50]}{'...' if len(lang.title) > 50 else ''}")
+                lines.append(f"- **Body**: {lang.body[:80]}{'...' if len(lang.body) > 80 else ''}")
+                lines.append(f"- **Link**: {lang.link_url}\n")
+
+            lines.append("## Configurazione\n")
+            lines.append(f"- **Formato**: {params.ad_format.value}")
+            lines.append(f"- **CTA**: {params.call_to_action.value}")
+            lines.append(f"- **Pagina**: {params.page_id}")
+            if params.instagram_user_id:
+                lines.append(f"- **Instagram**: {params.instagram_user_id}")
+
+            if params.status == AdStatus.PAUSED:
+                lines.append("\n⏸️ *L'annuncio è in stato PAUSED. Attivalo con `meta_ads_update_ad_status` quando pronto.*")
+
+            return "\n".join(lines)
+
+        else:
+            return json.dumps({
+                "success": True,
+                "ad_id": ad_id,
+                "creative_id": creative_id,
+                "ad_name": params.name,
+                "adset_id": params.adset_id,
+                "status": params.status.value,
+                "languages": [
+                    {
+                        "label": lang.label,
+                        "locale_ids": lang.locale_ids,
+                        "is_default": lang.is_default
+                    }
+                    for lang in params.languages
+                ]
+            }, indent=2)
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="meta_ads_update_ad_languages",
+    annotations={
+        "title": "Aggiorna Lingue Annuncio",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False
+    }
+)
+async def meta_ads_update_ad_languages(params: Any) -> str:
+    """
+    Aggiorna le lingue di un annuncio esistente.
+
+    Questo tool permette di modificare i testi multilingua di un annuncio
+    aggiornando l'asset_feed_spec del creative associato.
+
+    ATTENZIONE: Questa operazione sostituisce COMPLETAMENTE le lingue esistenti.
+    Devi fornire tutte le lingue desiderate, non solo quelle da modificare.
+
+    Args:
+        params (UpdateAdLanguagesInput): Parametri validati contenenti:
+            - ad_id (str): ID dell'annuncio da modificare
+            - languages (List[LanguageAsset]): Nuova lista completa delle lingue
+            - response_format (ResponseFormat): Formato output
+
+    Returns:
+        str: Conferma dell'aggiornamento con dettagli
+
+    Esempi d'uso:
+        - "Aggiorna testi italiano dell'annuncio 123456"
+        - "Aggiungi tedesco all'annuncio multilingua esistente"
+        - "Modifica tutti i testi dell'annuncio"
+
+    Note:
+        - Le lingue fornite SOSTITUISCONO completamente quelle esistenti
+        - Per aggiungere una lingua, includi tutte le lingue esistenti + la nuova
+        - Esattamente una lingua deve avere is_default=True
+        - L'aggiornamento è immediato
+    """
+    try:
+        # Gestisci il caso in cui params arrivi come stringa JSON
+        if isinstance(params, str):
+            params = UpdateAdLanguagesInput(**json.loads(params))
+        elif isinstance(params, dict):
+            params = UpdateAdLanguagesInput(**params)
+        elif not isinstance(params, UpdateAdLanguagesInput):
+            return f"Errore: tipo di parametro non valido: {type(params)}"
+
+        # Prima recupera i dati dell'annuncio per ottenere il creative_id
+        ad_data = await _make_api_request(
+            params.ad_id,
+            method="GET",
+            params={
+                "fields": "creative{id,object_story_spec,asset_feed_spec}"
+            }
+        )
+
+        creative_data = ad_data.get('creative', {})
+        creative_id = creative_data.get('id')
+
+        if not creative_id:
+            return "Errore: Impossibile recuperare il creative dell'annuncio. Verifica l'ID."
+
+        # Recupera l'asset_feed_spec esistente per mantenere le immagini/video
+        existing_asset_feed = creative_data.get('asset_feed_spec', {})
+        existing_object_story = creative_data.get('object_story_spec', {})
+
+        # Trova la lingua default per usare la sua label per l'immagine condivisa
+        default_lang = next((lang for lang in params.languages if lang.is_default), params.languages[0])
+        default_label = default_lang.label
+
+        # Costruisci il nuovo asset_feed_spec con le nuove lingue
+        bodies = []
+        titles = []
+        descriptions = []
+        link_urls = []
+        call_to_actions = []
+        asset_customization_rules = []
+
+        # Recupera il tipo di CTA esistente
+        existing_cta = 'LEARN_MORE'
+        if existing_asset_feed.get('call_to_actions'):
+            existing_cta = existing_asset_feed['call_to_actions'][0].get('type', 'LEARN_MORE')
+        elif existing_asset_feed.get('call_to_action_types'):
+            existing_cta = existing_asset_feed['call_to_action_types'][0]
+
+        for lang in params.languages:
+            bodies.append({
+                "text": lang.body,
+                "adlabels": [{"name": lang.label}]
+            })
+            titles.append({
+                "text": lang.title,
+                "adlabels": [{"name": lang.label}]
+            })
+            descriptions.append({
+                "text": lang.description,
+                "adlabels": [{"name": lang.label}]
+            })
+
+            # Link URL con display_url
+            link_url_entry = {
+                "website_url": lang.link_url,
+                "adlabels": [{"name": lang.label}]
+            }
+            # Aggiungi display_url se specificato, altrimenti estrai dal dominio
+            if lang.display_url:
+                link_url_entry["display_url"] = lang.display_url
+            else:
+                parsed = urlparse(lang.link_url)
+                link_url_entry["display_url"] = parsed.netloc or lang.link_url
+            link_urls.append(link_url_entry)
+
+            # Call to action per lingua
+            call_to_actions.append({
+                "type": existing_cta,
+                "adlabels": [{"name": lang.label}]
+            })
+
+            rule = {
+                "customization_spec": {
+                    "locales": lang.locale_ids
+                },
+                # image_label punta sempre all'immagine condivisa (label della lingua default)
+                "image_label": {"name": default_label},
+                "body_label": {"name": lang.label},
+                "title_label": {"name": lang.label},
+                "description_label": {"name": lang.label},
+                "link_url_label": {"name": lang.label},
+                "call_to_action_type_label": {"name": lang.label}
+            }
+
+            if lang.is_default:
+                rule["is_default"] = True
+
+            asset_customization_rules.append(rule)
+
+        # Costruisci il nuovo asset_feed_spec con optimization_type: LANGUAGE
+        new_asset_feed_spec = {
+            "optimization_type": "LANGUAGE",
+            "ad_formats": existing_asset_feed.get('ad_formats', ['SINGLE_IMAGE']),
+            "bodies": bodies,
+            "titles": titles,
+            "descriptions": descriptions,
+            "link_urls": link_urls,
+            "call_to_actions": call_to_actions,
+            "asset_customization_rules": asset_customization_rules
+        }
+
+        # Mantieni immagini o video esistenti, aggiornando adlabels con la label default
+        if 'images' in existing_asset_feed:
+            updated_images = []
+            for img in existing_asset_feed['images']:
+                updated_img = {**img, "adlabels": [{"name": default_label}]}
+                updated_images.append(updated_img)
+            new_asset_feed_spec['images'] = updated_images
+        if 'videos' in existing_asset_feed:
+            updated_videos = []
+            for vid in existing_asset_feed['videos']:
+                updated_vid = {**vid, "adlabels": [{"name": default_label}]}
+                updated_videos.append(updated_vid)
+            new_asset_feed_spec['videos'] = updated_videos
+
+        # Aggiorna il creative
+        await _make_api_request(
+            creative_id,
+            method="POST",
+            params={
+                "asset_feed_spec": json.dumps(new_asset_feed_spec)
+            }
+        )
+
+        if params.response_format == ResponseFormat.MARKDOWN:
+            lines = ["# ✅ Lingue Annuncio Aggiornate\n"]
+            lines.append(f"**ID Annuncio**: {params.ad_id}")
+            lines.append(f"**ID Creative**: {creative_id}\n")
+
+            lines.append("## Nuove Lingue Configurate\n")
+            for lang in params.languages:
+                default_marker = " ⭐ (default)" if lang.is_default else ""
+                lines.append(f"### {lang.label.capitalize()}{default_marker}")
+                lines.append(f"- **Locale IDs**: {lang.locale_ids}")
+                lines.append(f"- **Titolo**: {lang.title[:50]}{'...' if len(lang.title) > 50 else ''}")
+                lines.append(f"- **Body**: {lang.body[:80]}{'...' if len(lang.body) > 80 else ''}")
+                lines.append(f"- **Link**: {lang.link_url}\n")
+
+            lines.append("---")
+            lines.append("*Le modifiche sono attive immediatamente.*")
+
+            return "\n".join(lines)
+
+        else:
+            return json.dumps({
+                "success": True,
+                "ad_id": params.ad_id,
+                "creative_id": creative_id,
+                "languages_updated": len(params.languages),
+                "languages": [
+                    {
+                        "label": lang.label,
+                        "locale_ids": lang.locale_ids,
+                        "is_default": lang.is_default
+                    }
+                    for lang in params.languages
+                ]
+            }, indent=2)
 
     except Exception as e:
         return _handle_api_error(e)

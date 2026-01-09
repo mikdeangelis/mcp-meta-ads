@@ -11,3 +11,6 @@ pydantic>=2.0.0
 
 # Standard library enhancements (se necessario)
 python-dotenv>=1.0.0  # Opzionale: per gestire .env file
+
+# TOON format encoding (token-optimized output)
+python-toon>=0.1.0
